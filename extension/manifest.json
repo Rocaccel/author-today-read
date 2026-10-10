@@ -4,7 +4,7 @@
   "version": "0.2.0",
   "description": "Отметки ✅/❌ рядом с названиями книг в списках, таблицах и на странице книги. Синхронизация между устройствами через Firebase по кодовой фразе.",
   "permissions": ["storage"],
-  "host_permissions": ["https://firestore.googleapis.com/*"],
+  "host_permissions": ["https://*.firebasedatabase.app/*"],
   "content_scripts": [
     {
       "matches": ["https://author.today/*"],

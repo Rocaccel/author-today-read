@@ -26,7 +26,7 @@ Chrome-расширение (Manifest V3) для сайта <https://author.toda
 
 1. Элементы управления добавляются **рядом с названием книги в строке** (в заголовке).
 2. Хранение: **localStorage страницы — первичный кэш** (офлайн и работа без
-   входа), **синхронизация между устройствами — Firebase** (Firestore REST)
+   входа), **синхронизация между устройствами — Firebase** (Realtime Database REST)
    по кодовой фразе (v0.2.0, §8). Отметки хранятся ТОЛЬКО в localStorage;
    в `chrome.storage.local` лежат лишь кодовая фраза и статусы синхронизации
    (страница author.today их не читает).
@@ -217,9 +217,9 @@ URL: `https://author.today/work/233831` — одиночная карточка 
   не попадает — сайт author.today её не видит.
 - Требует `"permissions": ["storage"]` в manifest.
 
-### 3.4. Облако — Firestore (см. §8)
+### 3.4. Облако — Firebase Realtime Database (см. §8)
 
-Путь `users/{userId}/marks/{workId}`, формат документа — §8.2.
+Путь `users/{userId}/marks/{workId}`, формат узла — §8.2.
 Отметки в облаке всегда шифрованные; ключ — только от кодовой фразы.
 
 ---
@@ -237,7 +237,7 @@ author-today-readed/
 ├── tests/
 │   └── smoke.test.js            ← автотесты jsdom (инжект, семантика, v2, LWW, фраза, крипто, sync)
 └── extension/                   ← содержимое расширения (грузится в Chrome)
-    ├── manifest.json            ← MV3: permissions storage, host_permissions firestore, options_ui
+    ├── manifest.json            ← MV3: permissions storage, host_permissions rtdb, options_ui
     ├── content/
     │   ├── storage.js           ← модуль хранения (localStorage, схема v2 + миграция + mergeRemote)
     │   ├── sync.js              ← синхронизация: content ↔ background через chrome.runtime
@@ -253,7 +253,7 @@ author-today-readed/
     │   └── options.css
     └── background/
         ├── service-worker.js    ← ES-модуль: роутер сообщений + хранилище фразы
-        ├── firebase.js          ← Firestore REST-клиент (list + batchWrite + sync)
+        ├── firebase.js          ← Realtime Database REST-клиент (GET/PATCH .json + sync)
         └── config.js            ← ГЕНЕРИРУЕТСЯ из .env (GITIGNORE, в свежем клоне отсутствует)
 ```
 
@@ -281,7 +281,7 @@ author-today-readed/
   (синхронизация просто выключена, `isReady() === false`).
 - Options-страница — `<script type="module">`, тоже импортирует `../shared/phrase.js`.
 - `permissions`: `["storage"]` (chrome.storage.local для фразы/статусов).
-  `host_permissions`: `["https://firestore.googleapis.com/*"]` (fetch из background).
+  `host_permissions`: `["https://*.firebasedatabase.app/*"]` (fetch из background).
 
 ### 4.2. Контракты модулей (сигнатуры, которые обязаны соблюдаться)
 
@@ -326,7 +326,7 @@ author-today-readed/
 | функция | что делает |
 |---|---|
 | `loadConfig()` | кэшированный `import('./config.js')` с catch → `{config, ready}` (файла может не быть) |
-| `initFirebase(config)` → клиент | `isReady()` (apiKey+projectId), `pullDocs(userId)` (GET list; 404 → `[]`), `sync(userId, phrase, localEntries)` → `{pull, pushed, skipped}`: расшифровывает облако, пушит локальное новее облака (batchWrite), возвращает облачное новее локального. Ошибки HTTP — исключение со свойством `status` |
+| `initFirebase(config)` → клиент | `isReady()` (databaseURL), `pullDocs(userId)` (GET `{db}/users/{uid}/marks.json`; пустое дерево → `null` → `[]`), `sync(userId, phrase, localEntries)` → `{pull, pushed, skipped}`: расшифровывает облако, пушит локальное новее облака одним `PATCH` (RTDB мержит ветки), возвращает облачное новее локального. Ошибки HTTP — исключение со свойством `status` |
 
 **`background/service-worker.js` (роутер `chrome.runtime.onMessage`)**
 
@@ -335,7 +335,7 @@ author-today-readed/
 | `atr:status` | `→ {ok, configReady, hasPhrase, userId, lastSync, lastError, ready}` |
 | `atr:phrase:set` | `{phrase}` → валидация, `deriveUserId`, сохранение в `chrome.storage.local` → `{ok, userId}` / `{ok:false, error}` |
 | `atr:phrase:clear` | `→ {ok}` (удаляет фразу/userId/ошибку) |
-| `atr:sync:sync` | `{entries}` → полный round-trip с Firestore → `{ok, pull, pushed, skipped}` либо `{ok:false, skip:true, reason:'config'\|'phrase'}` (не ошибка!) либо `{ok:false, error}` (сеть/правила, текст сохраняется в `atr.sync.lastError`) |
+| `atr:sync:sync` | `{entries}` → полный round-trip с Realtime Database → `{ok, pull, pushed, skipped}` либо `{ok:false, skip:true, reason:'config'\|'phrase'}` (не ошибка!) либо `{ok:false, error}` (сеть/правила, текст сохраняется в `atr.sync.lastError`) |
 
 `options/options.js` — чистый UI: `generatePhrase/validatePhrase/normalizePhrase`
 из shared + те же 4 сообщения; локальных данных не хранит.
@@ -377,7 +377,7 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
   "version": "0.2.0",
   "description": "Отметки ✅/❌ рядом с названиями книг в списках, таблицах и на странице книги. Синхронизация между устройствами через Firebase по кодовой фразе.",
   "permissions": ["storage"],
-  "host_permissions": ["https://firestore.googleapis.com/*"],
+  "host_permissions": ["https://*.firebasedatabase.app/*"],
   "content_scripts": [
     {
       "matches": ["https://author.today/*"],
@@ -433,7 +433,7 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 5. Переключить на плитку: панелей **нет** (проверить отсутствие).
 6. Пагинация/фильтр каталога (pjax): после перехода панели на новой странице есть,
    дублей нет.
-7. Перезагрузка страницы: отметки сохранились (localStorage, ключ `atr.v1.marks`).
+7. Перезагрузка страницы: отметки сохранились (localStorage, ключ `atr.v2.marks`).
 8. Открыть ту же страницу во второй вкладке, поставить отметку в одной — во второй
    обновилась (событие `storage`).
 9. Тёмная тема сайта: кнопки читаемы, рамки видимы.
@@ -449,11 +449,13 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
     (shared/background/options) — `node --check` копии с расширением `.mjs`.
 14. **Миграция**: открыть страницу со старыми данными `atr.v1.marks` → после
     загрузки ключ v1 удалён, `atr.v2.marks` содержит `{m, t}`, отметки читаются.
-15. **Конфиг**: `npm run config` создаёт `extension/background/config.js`;
-    `git status` не показывает `.env` и `config.js` (в .gitignore).
+15. **Конфиг**: в `.env` заполнен `FIREBASE_DATABASE_URL` → `npm run config`
+    создаёт `extension/background/config.js`; `git status` не показывает
+    `.env` и `config.js` (в .gitignore).
 16. **Options**: «Создать фразу» → чекбокс → вход; статус показывает userId
     (64 hex) и время; без фразы контент-скрипт работает локально без ошибок.
-17. **Синхронизация** (ручная, после настройки конфига): два браузера с одной
+17. **Синхронизация** (ручная, после настройки конфига): правила RTDB
+    вставлены (Rules → Publish); два браузера с одной
     фразой → отметка в одном появляется в другом (дождаться push/pull: клик →
     ~1.5 с → открыть/фокус на второй вкладке); «Выйти» удаляет фразу с устройства,
     облачные данные остаются.
@@ -466,10 +468,10 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
   `jsdom` как **devDependency** для `tests/smoke.test.js`: он не попадает в
   расширение и не влияет на его работу.)
 - **Секретов нет**: в репозитории не должно появиться реальных ключей Firebase
-  или других токенов — конфиг в `background/firebase.js` остаётся пустым.
+  или других токенов — конфиг живёт только в `.env`/`config.js` (gitignore).
 - Не добавлять chrome.storage / сетевые запросы / реальный Firebase **без
   нового запроса пользователя**. (Запрос получен: v0.2.0 — `storage` только
-  для фразы/статусов, сети только к `firestore.googleapis.com` из background,
+  для фразы/статусов, сети только к `*.firebasedatabase.app` из background,
   конфиг через `.env` → `config.js`, оба файла в .gitignore — §8.4.)
 - Не добавлять firebase-SDK/bundler — только REST API по `fetch` (§8.1).
 - Не ставить панели в плитку `.bookcard` и на страницы вне `/search*` и `/work*`.
@@ -488,8 +490,8 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 ### 8.1. Архитектура
 
 ```
-[страница author.today]                       [background SW]              [Firestore]
-content/storage.js (кэш v2)  atr:sync:sync   service-worker.js   list/batchWrite
+[страница author.today]                       [background SW]          [Realtime Database]
+content/storage.js (кэш v2)  atr:sync:sync   service-worker.js   GET/PATCH .json
 content/sync.js ──────────────────────────►  firebase.js  ─────────────────►  users/{uid}/marks/*
         ▲                                       │ sha256/pbkdf2/aes
         └── merge LWW (pull) ◄─────────────────┘ из chrome.storage.local
@@ -509,7 +511,7 @@ content/sync.js ─────────────────────�
 ### 8.2. Модель данных и правила
 
 ```
-users/{userId}/marks/{workId} {
+users/{userId}/marks/{workId} → {
   updatedAt: integer,   // ОТКРЫТО — по нему идёт LWW-слияние на клиенте
   v: "1", iv: string,   // ОТКРЫТО — версия схемы и nonce (base64)
   ct:  string           // шифротекст JSON {m: "read"|"skip"|null} (base64)
@@ -518,22 +520,30 @@ users/{userId}/marks/{workId} {
 
 - `userId = hex(SHA-256(нормализованной фразы))` — детерминирован, одинаков
   на всех устройствах с одной фразой.
-- Правила Firestore (пользователь настраивает в консоли, сниппет в README):
+- Правила Realtime Database (пользователь настраивает в консоли:
+  Realtime Database → вкладка Rules; сниппет в README):
 
-```
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /users/{userId}/marks/{workId} {
-      allow read, write: if true;  // контент зашифрован ключом от фразы
+```json
+{
+  "rules": {
+    "users": {
+      "$userId": {
+        "marks": {
+          ".read": true,
+          ".write": true
+        }
+      }
     }
   }
 }
 ```
 
-- REST (без SDK, без сборки):
-  - pull: `GET https://firestore.googleapis.com/v1/projects/{pid}/databases/(default)/documents/users/{uid}/marks?key={apiKey}` — пустая коллекция отвечает `404 NOT_FOUND` → «данных нет»;
-  - push: `POST .../documents:batchWrite?key={apiKey}` — `{writes:[{update:{name, fields}}]}`, максимум одна запись на документ в батче.
+- REST (без SDK, без сборки; ключ API не нужен — доступ определяют правила):
+  - pull: `GET {databaseURL}/users/{uid}/marks.json` — пустое дерево отвечает
+    `200 + null` → «данных нет»;
+  - push: `PATCH {databaseURL}/users/{uid}/marks.json` с JSON-объектом
+    `{workId: {updatedAt, v, iv, ct}, ...}` — RTDB мержит переданные ветки,
+    чужие workId не затрагивает (одна запись = один запрос).
 
 ### 8.3. Криптография (shared/phrase.js)
 
@@ -547,13 +557,15 @@ service cloud.firestore {
 
 ### 8.4. Конфигурация: `.env` → `config.js`
 
-1. Пользователь заполняет `.env` (шаблон в корне; поля из Firebase-консоли:
-   Project settings → SDK setup and configuration → Config).
+1. Пользователь заполняет `.env` (шаблон в корне): формат `KEY=VALUE` либо
+   вставленный целиком JS-блок `const firebaseConfig = {...}` из
+   Firebase-консоли (Project settings → SDK setup) — скрипт разбирает оба.
 2. `npm run config` (`scripts/apply-config.js`) → `extension/background/config.js`
    (`export const firebaseConfig`, `export const firebaseConfigReady`).
 3. Оба файла в `.gitignore`. Свежий клон без конфига — рабочее расширение,
    `loadConfig()` ловит отсутствие `import()` и возвращает `ready:false`.
-4. Минимум для работы: `FIREBASE_API_KEY` + `FIREBASE_PROJECT_ID`.
+4. Минимум для работы: `FIREBASE_DATABASE_URL` (Realtime Database; готовность
+   `firebaseConfigReady = !!databaseURL`).
 
 ### 8.5. Options-страница (`chrome://extensions` → «Настройки»)
 

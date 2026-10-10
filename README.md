@@ -43,42 +43,48 @@ Chrome-расширение (Manifest V3): кнопки **[+]** и **[−]** с 
 
 ## Синхронизация между устройствами (v0.2.0)
 
-Отметки синхронизируются через **Firebase (Firestore)**. Входа по логину-паролю
-нет: единственный доступ — **кодовая фраза** (~15 слов). Из неё выводится
-идентификатор пользователя и ключ шифрования — в облаке лежат только
+Отметки синхронизируются через **Firebase Realtime Database**. Входа по
+логину-паролю нет: единственный доступ — **кодовая фраза** (~15 слов). Из неё
+выводится идентификатор пользователя и ключ шифрования — в облаке лежат только
 шифротексты, без фразы данные нечитаемы.
 
 ### Настройка (один раз)
 
-1. Создайте проект в [Firebase Console](https://console.firebase.google.com/)
-   → **Build → Firestore Database → Create database** (регион по умолчанию).
-2. Включите **Web-приложение** (Project settings → Your apps → SDK setup),
-   скопируйте значения `apiKey` и `projectId`.
-3. Настройте правила базы (Firestore → Rules) — данные зашифрованы, поэтому
-   правила открыты:
+1. В [Firebase Console](https://console.firebase.google.com/) →
+   **Build → Realtime Database → Create database** (если БД ещё нет; у вас
+   она уже создана — `databaseURL` вида
+   `https://<проект>-default-rtdb.<регион>.firebasedatabase.app`).
+2. Настройте правила базы: **Realtime Database → вкладка Rules** —
+   данные зашифрованы, поэтому правила открыты:
 
-   ```
-   rules_version = '2';
-   service cloud.firestore {
-     match /databases/{database}/documents {
-       match /users/{userId}/marks/{workId} {
-         allow read, write: if true;
+   ```json
+   {
+     "rules": {
+       "users": {
+         "$userId": {
+           "marks": {
+             ".read": true,
+             ".write": true
+           }
+         }
        }
      }
    }
    ```
 
-   «Publish» → Continue (в консоли будет предупреждение — это ожидаемо).
-4. В папке проекта заполните файл **`.env`** (он в `.gitignore`, на GitHub не
-   попадает): минимум `FIREBASE_API_KEY` и `FIREBASE_PROJECT_ID`.
-5. Выполните в терминале:
+   **Publish** (предупреждение консоли об открытом доступе — ожидаемо,
+   контент шифрованный).
+3. В папке проекта заполните файл **`.env`** (он в `.gitignore`, на GitHub не
+   попадает): минимум `FIREBASE_DATABASE_URL`. Можно вставить и JS-блок
+   `const firebaseConfig = {...}` из консоли целиком — скрипт разберёт.
+4. Выполните в терминале:
 
    ```
    npm run config
    ```
 
    Это создаст `extension/background/config.js` (тоже в `.gitignore`).
-6. Перезагрузите расширение в `chrome://extensions`.
+5. Перезагрузите расширение в `chrome://extensions`.
 
 Без конфига расширение работает локально — синхронизация просто выключена.
 
@@ -112,7 +118,7 @@ package.json           тесты + npm run config
 scripts/apply-config.js  .env → extension/background/config.js
 tests/                 автотесты jsdom
 extension/             ← грузится в Chrome как распакованное расширение
-  manifest.json           MV3 (permissions: storage; options_ui; host: firestore)
+  manifest.json           MV3 (permissions: storage; options_ui; host: rtdb)
   content/storage.js      хранение в localStorage, схема v2 + миграция
   content/sync.js         синхронизация с Firebase (content ↔ background)
   content/ui.js           панель [+] [индикатор] [−]
@@ -122,7 +128,7 @@ extension/             ← грузится в Chrome как распакова�
   shared/phrase.js        кодовая фраза, userId, PBKDF2/AES-GCM
   options/                страница настроек (фраза, статус, синхронизация)
   background/service-worker.js  роутер сообщений + хранилище фразы
-  background/firebase.js  Firestore REST-клиент (pull/batchWrite/sync)
+  background/firebase.js  Realtime Database REST-клиент (GET/PATCH/sync)
   background/config.js    ГЕНЕРИРУЕТСЯ из .env (GITIGNORE)
 ```
 

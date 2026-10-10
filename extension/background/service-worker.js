@@ -8,7 +8,8 @@
  *   atr:status        → состояние (конфиг/фраза/последняя синхронизация)
  *   atr:phrase:set    {phrase}  → валидация, userId, сохранение фразы
  *   atr:phrase:clear  → выход (фраза удаляется с устройства)
- *   atr:sync:sync     {entries} → полный round-trip с Firestore, возврат pull
+ *   atr:sync:sync     {entries} → полный round-trip с Realtime Database,
+ *                     возврат pull
  *
  * Фраза хранится ТОЛЬКО в chrome.storage.local (читает одно расширение,
  * страница author.today её не видит). В page localStorage не попадает.
@@ -44,7 +45,7 @@ async function handleStatus() {
   const { config } = await loadConfig();
   const [phrase, userId] = await Promise.all([getPhrase(), getUserId()]);
   const data = await chrome.storage.local.get([K_LAST_SYNC, K_LAST_ERROR]);
-  const configReady = !!(config.apiKey && config.projectId);
+  const configReady = !!(config.databaseURL && config.databaseURL.startsWith('https://'));
   return {
     ok: true,
     configReady,
@@ -101,7 +102,7 @@ async function handleSync(msg) {
     // Ошибка сети/правил — сохраняем для options, content остаётся тихим.
     let message = String(err && err.message ? err.message : err);
     if (err && (err.status === 401 || err.status === 403)) {
-      message += ' — проверьте правила Firestore (должны быть открыты, см. README)';
+      message += ' — проверьте правила Realtime Database (должны быть открыты, см. README)';
     }
     await setLastError(message);
     return { ok: false, error: message };

@@ -38,12 +38,33 @@ function parseEnv(text) {
   return out;
 }
 
+/**
+ * Фолбэк: пользователь мог вставить JS-блок из Firebase-консоли
+ * (const firebaseConfig = { apiKey: "...", databaseURL: "..." }).
+ * Разбираем `key: "value"` и маппим на FIREBASE_* — имена полей
+ * консоли совпадают с нашими.
+ */
+function parseJsConfigBlock(text) {
+  const out = {};
+  const re = /\b(apiKey|authDomain|databaseURL|projectId|storageBucket|messagingSenderId|appId|measurementId)\s*:\s*"([^"]*)"/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    out['FIREBASE_' + m[1].toUpperCase()] = m[2];
+  }
+  return out;
+}
+
 function main() {
   if (!fs.existsSync(ENV_PATH)) {
     console.error('[apply-config] файл .env не найден. Создайте .env (см. .env.example в документации).');
     process.exit(1);
   }
-  const env = parseEnv(fs.readFileSync(ENV_PATH, 'utf8'));
+  const raw = fs.readFileSync(ENV_PATH, 'utf8');
+  let env = parseEnv(raw);
+  // Если по формату KEY=VALUE ничего нет — пробуем JS-блок из консоли
+  if (!Object.keys(env).some((k) => k.startsWith('FIREBASE_'))) {
+    env = parseJsConfigBlock(raw);
+  }
 
   const config = {
     apiKey: env.FIREBASE_API_KEY || '',
@@ -56,7 +77,8 @@ function main() {
     measurementId: env.FIREBASE_MEASUREMENT_ID || ''
   };
 
-  const filled = config.apiKey && config.projectId;
+  // Готовность к синхронизации: для Realtime Database нужен databaseURL.
+  const filled = !!config.databaseURL;
   const banner =
     '/**\n' +
     ' * СГЕНЕРИРОВАНО scripts/apply-config.js из .env — НЕ РЕДАКТИРУЙТЕ ВРУЧНУЮ.\n' +
@@ -77,8 +99,8 @@ function main() {
   console.log(`[apply-config] записан ${path.relative(ROOT, OUT_PATH)}`);
   console.log(
     filled
-      ? '[apply-config] конфиг заполнен (apiKey + projectId) — синхронизация доступна.'
-      : '[apply-config] apiKey/projectId пустые — синхронизация будет выключена (расширение работает локально).'
+      ? '[apply-config] конфиг заполнен (databaseURL) — синхронизация доступна.'
+      : '[apply-config] FIREBASE_DATABASE_URL пустой — синхронизация будет выключена (расширение работает локально).'
   );
 }
 

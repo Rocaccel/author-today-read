@@ -4,13 +4,13 @@
  * Используется ДВУМЯ контекстами:
  *   1) options-страница — генерация/валидация фразы, показ userId;
  *   2) background service worker — вывод ключа шифрования и userId,
- *      шифрование/дешифрование отметок перед записью в Firestore.
+ *      шифрование/дешифрование отметок перед записью в Realtime Database.
  *
  * Модель (см. AGENTS.md §8):
  *   - кодовая фраза ~15 слов — единственный «пароль» пользователя;
  *   - userId = hex(SHA-256(нормализованной фразы)) — путь в БД;
  *   - ключ = PBKDF2-SHA256(фраза, соль, 100k) → AES-GCM-256;
- *   - в облаке лежит шифротекст, поэтому правила Firestore могут быть
+ *   - в облаке лежит шифротекст, поэтому правила БД могут быть
  *     открытыми — без фразы данные не прочитать.
  */
 
@@ -74,7 +74,7 @@ export function generatePhrase(wordCount = PHRASE_WORDS) {
   return Array.from(random, (n) => WORDLIST[n % WORDLIST.length]).join(' ');
 }
 
-/** userId = hex(SHA-256(нормализованной фразы)) — путь users/{userId} в Firestore. */
+/** userId = hex(SHA-256(нормализованной фразы)) — путь users/{userId} в БД. */
 export async function deriveUserId(phrase) {
   const digest = await crypto.subtle.digest('SHA-256', enc.encode(normalizePhrase(phrase)));
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');

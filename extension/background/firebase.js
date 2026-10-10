@@ -1,20 +1,24 @@
 /**
- * firebase.js — клиент Firebase (Firestore REST API) для background SW.
+ * firebase.js — клиент Realtime Database (REST API) для background SW.
  *
  * Почему REST, а не SDK (см. AGENTS.md §8):
  *   - MV3 ES-модульный SW не умеет грузить удалённые скрипты, а firebase-SDK
  *     потребовал бы сборки (в проекте запрещена, §7);
- *   - Firestore полностью доступен по REST: list + batchWrite покрывают наши
- *     сценарии (pull всех отметок и пачечная запись).
+ *   - Realtime Database полностью доступен по REST: GET/PATCH на узел
+ *     покрывают наши сценарии (pull всех отметок и пачечная запись).
  *
- * Модель данных: users/{userId}/marks/{workId} = {
- *   updatedAt: int   — открыто (для слияния LWW на клиенте),
- *   v, iv, ct: str    — AES-GCM шифротекст отметки (см. shared/phrase.js).
- * } Правила БД открытые — контент зашифрован ключом от кодовой фразы.
+ * БД проекта — Realtime Database (databaseURL из .env), НЕ Firestore.
+ * Модель данных (см. AGENTS.md §8.2):
+ *   users/{userId}/marks/{workId} = {
+ *     updatedAt: int   — открыто (для слияния LWW на клиенте),
+ *     v, iv, ct: str    — AES-GCM шифротекст отметки (см. shared/phrase.js).
+ *   }
+ * Правила БД открытые — контент зашифрован ключом от кодовой фразы.
  *
  * Конфиг подтягивается динамическим import() из config.js (генерируется из
  * .env командой `npm run config`, файл в .gitignore). Если файла нет или
- * поля пустые — isReady() === false, синхронизация выключена, ошибок нет.
+ * databaseURL пустой — isReady() === false, синхронизация выключена, ошибок нет.
+ * Ключ API для RTDB REST не нужен — доступ определяют только правила БД.
  */
 
 import { deriveKey, encryptMark, decryptMark } from '../shared/phrase.js';
@@ -43,58 +47,46 @@ export function loadConfig() {
 
 /** Клиент инициализируется с пустым конфигом; реальные значения loadConfig() подставит позже. */
 export function initFirebase(config = {}) {
-  const baseDocsUrl = () =>
-    `https://firestore.googleapis.com/v1/projects/${config.projectId}/databases/(default)/documents`;
+  // Базовый URL Realtime Database без хвостового слэша
+  const root = String(config.databaseURL || '').replace(/\/+$/, '');
 
-  /** Путь коллекции отметок пользователя. */
-  const marksUrl = (userId) => `${baseDocsUrl()}/users/${userId}/marks`;
+  /** Узел отметок пользователя: {root}/users/{uid}/marks.json */
+  const marksUrl = (userId) => `${root}/users/${userId}/marks.json`;
 
   /**
    * Pull: все отметки пользователя из облака → [{workId, updatedAt, ...iv/ct}].
-   * Пустая коллекция у Firestore отвечает 404 NOT_FOUND — это «данных нет».
+   * Пустой узел в RTDB — это `null` в теле ответа (не ошибка).
    */
   async function pullDocs(userId) {
-    const url = `${marksUrl(userId)}?key=${encodeURIComponent(config.apiKey)}`;
-    const res = await fetch(url, { method: 'GET' });
-    if (res.status === 404) return [];
+    const res = await fetch(marksUrl(userId), { method: 'GET' });
     if (!res.ok) throw httpError('pull', res);
     const body = await res.json();
-    if (!body.documents) return [];
-    return body.documents.map((doc) => {
-      const f = doc.fields || {};
-      return {
-        // workId — последний сегмент имени документа users/{uid}/marks/{wid}
-        workId: doc.name.split('/').pop(),
-        updatedAt: Number(f.updatedAt ? f.updatedAt.integerValue : 0) || 0,
-        v: f.v ? f.v.stringValue : '',
-        iv: f.iv ? f.iv.stringValue : '',
-        ct: f.ct ? f.ct.stringValue : ''
-      };
-    });
+    if (!body || typeof body !== 'object') return []; // null — данных нет
+    return Object.entries(body)
+      .filter(([workId, val]) => workId && val && typeof val === 'object')
+      .map(([workId, val]) => ({
+        workId,
+        updatedAt: Number(val.updatedAt) || 0,
+        v: String(val.v || ''),
+        iv: String(val.iv || ''),
+        ct: String(val.ct || '')
+      }));
   }
 
   /**
-   * Push: пачечная запись. batchWrite не принимает две записи на один doc —
-   * по одному элементу на workId — это выполняется.
+   * Push: пачечная запись одним PATCH (RTDB мержит переданные ветки,
+   * чужие workId не затрагивает). Томбстоуны шифруются так же, как отметки.
    */
   async function pushDocs(userId, docs) {
     if (!docs.length) return;
-    const url = `${baseDocsUrl()}:batchWrite?key=${encodeURIComponent(config.apiKey)}`;
-    const writes = docs.map((d) => ({
-      update: {
-        name: `${marksUrl(userId)}/${d.workId}`,
-        fields: {
-          updatedAt: { integerValue: String(d.updatedAt) },
-          v: { stringValue: d.v },
-          iv: { stringValue: d.iv },
-          ct: { stringValue: d.ct }
-        }
-      }
-    }));
-    const res = await fetch(url, {
-      method: 'POST',
+    const patch = {};
+    for (const d of docs) {
+      patch[d.workId] = { updatedAt: d.updatedAt, v: d.v, iv: d.iv, ct: d.ct };
+    }
+    const res = await fetch(marksUrl(userId), {
+      method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ writes })
+      body: JSON.stringify(patch)
     });
     if (!res.ok) throw httpError('push', res);
   }
@@ -149,7 +141,7 @@ export function initFirebase(config = {}) {
   }
 
   function isReady() {
-    return !!(config.apiKey && config.projectId);
+    return !!root;
   }
 
   /** Ошибку HTTP превращаем в понятный статус для options-страницы. */
