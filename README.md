@@ -12,7 +12,7 @@ Chrome-расширение (Manifest V3): кнопки **[+]** и **[−]** с 
 1. Откройте `chrome://extensions`.
 2. Включите **Режим разработчика** (правый верхний угол).
 3. Нажмите **Загрузить распакованное расширение** и выберите папку
-   `autor-today-readed/extension`.
+   `author-today-readed/extension`.
 4. Откройте `https://author.today/work/genre/fantasy` — у каждого заголовка
    книги в списке появится панель отметок.
 

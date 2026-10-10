@@ -4,7 +4,7 @@
 нейросеть/агент должна суметь **полностью воссоздать расширение с нуля**, только
 прочитав этот файл (исходный `promt.md` удалён, все правки требований внесены сюда).
 
-Папка проекта: `C:\Users\ser\Desktop\GitHub\autor-today-readed`
+Папка проекта: `C:\Users\ser\Desktop\GitHub\author-today-readed`
 Рабочая папка расширения: `extension/` (именно её грузят в Chrome как unpacked).
 
 ---
@@ -198,7 +198,7 @@ URL: `https://author.today/work/233831` — одиночная карточка 
 ## 4. Архитектура и состав файлов
 
 ```
-autor-today-readed/
+author-today-readed/
 ├── AGENTS.md                    ← этот файл (спецификация)
 ├── README.md                    ← инструкция по установке для пользователя
 ├── package.json                 ← ТОЛЬКО для тестов (jsdom devDependency + "npm test")
