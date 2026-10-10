@@ -12,7 +12,11 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const { JSDOM } = require('jsdom');
+
+// WebCrypto нужен для shared/phrase.js (Node <19 crypto не глобальный)
+if (!globalThis.crypto) globalThis.crypto = require('crypto').webcrypto;
 
 const EXT = path.join(__dirname, '..', 'extension');
 const read = (p) => fs.readFileSync(path.join(EXT, p), 'utf8');
@@ -51,6 +55,9 @@ function assert(cond, msg) {
   if (cond) console.log('  ok  -', msg);
   else { failures++; console.error('  FAIL-', msg); }
 }
+
+/** Чтение хранилища схемы v2 конкретной jsdom-вкладки. */
+const readMarks = (w) => JSON.parse(w.localStorage.getItem('atr.v2.marks') || '{}');
 
 async function main() {
   const dom = new JSDOM(HTML, {
@@ -91,9 +98,10 @@ async function main() {
   assert(status.textContent === '', 'нейтральное состояние: пусто');
   click(plus);
   assert(status.textContent === '✅', '+ из пусто → ✅');
-  assert(JSON.parse(window.localStorage.getItem('atr.v1.marks'))['659887'] === 'read', 'в хранилище read');
+  assert(readMarks(window)['659887'].m === 'read' && typeof readMarks(window)['659887'].t === 'number', 'в хранилище v2: {m:"read", t}');
   click(plus);
-  assert(status.textContent === '' && !('659887' in JSON.parse(window.localStorage.getItem('atr.v1.marks'))), '+ при ✅ → пусто, ключ удалён');
+  const afterRemove = readMarks(window);
+  assert(status.textContent === '' && afterRemove['659887'].m === null, '+ при ✅ → пусто, томбстоун {m:null}');
   click(minus);
   assert(status.textContent === '❌', '− из пусто → ❌');
   click(minus);
@@ -113,8 +121,8 @@ async function main() {
   const tStatus = tablePanel.querySelector('.atr-status');
   click(tablePanel.querySelector('.atr-plus'));
   assert(tStatus.textContent === '✅', 'книга из таблицы получила ✅');
-  const marks = JSON.parse(window.localStorage.getItem('atr.v1.marks'));
-  assert(marks['463277'] === 'read', 'отметка книги 463277 в хранилище');
+  const marks = readMarks(window);
+  assert(marks['463277'].m === 'read', 'отметка книги 463277 в хранилище v2');
 
   console.log('\n[4] pjax: новая разметка после события pjax:end');
   const container = document.getElementById('pjax-container');
@@ -181,10 +189,11 @@ async function main() {
   assert(dom3.window.document.querySelectorAll('.atr-controls').length === 1, 'ровно одна панель');
   dom3.window.ATR.dom.scan();
   assert(h1.querySelectorAll('.atr-controls').length === 1, 'повторный scan() не дублирует панель');
-  // Снимаем отметку на странице книги — запись удалена из хранилища
+  // Снимаем отметку на странице книги — томбстоун в схеме v2
   bookPanel.querySelector('.atr-plus').dispatchEvent(new dom3.window.MouseEvent('click', { bubbles: true, cancelable: true }));
   assert(bStatus.textContent === '', '+ при ✅ снимает отметку и на странице книги');
-  assert(!('233831' in JSON.parse(dom3.window.localStorage.getItem('atr.v1.marks'))), 'ключ удалён из atr.v1.marks');
+  assert(readMarks(dom3.window)['233831'].m === null, 'в v2 записалаcь {m:null} (томбстоун)');
+  assert(dom3.window.localStorage.getItem('atr.v1.marks') === null, 'ключ v1 после миграции удалён');
 
   console.log('\n[8] Страница книги без разметки заголовка — без панели и без ошибок');
   const dom4 = new JSDOM('<!DOCTYPE html><html><body><div class="book-page"></div></body></html>', {
@@ -197,6 +206,93 @@ async function main() {
   }
   await sleep(50);
   assert(dom4.window.document.querySelectorAll('.atr-controls').length === 0, 'без h1.book-title панель не вставляется');
+
+  console.log('\n[9] Схема v2: миграция с v1 и слияние LWW');
+  const dom5 = new JSDOM(HTML, { url: 'https://author.today/work/genre/fantasy', runScripts: 'outside-only', pretendToBeVisual: true });
+  dom5.window.localStorage.setItem('atr.v1.marks', JSON.stringify({ '659887': 'read', '463277': 'skip', bad: 'zzz' }));
+  for (const f of ['content/storage.js', 'content/sync.js', 'content/ui.js', 'content/dom.js', 'content/main.js']) {
+    dom5.window.eval(read(f));
+  }
+  await sleep(50);
+  const S5 = dom5.window.ATR.storage;
+  assert(dom5.window.localStorage.getItem('atr.v1.marks') === null, 'ключ v1 удалён после миграции');
+  assert(S5.get('659887') === 'read' && S5.get('463277') === 'skip', 'отметки читаются после миграции v1→v2');
+  assert(S5.get('bad') === null, 'невалидное значение из v1 отброшено');
+  assert(typeof S5.getStamp('659887') === 'number', 'у мигрированной отметки появилась метка времени');
+
+  const now = Date.now();
+  const changed1 = S5.mergeRemote({ '111': { m: 'read', t: now + 10000 }, '659887': { m: 'skip', t: now + 10000 } });
+  assert(changed1.length === 2, 'облачные записи новее локальных — приняты');
+  assert(S5.get('659887') === 'skip', 'LWW: более новая облачная отметка победила');
+  const changed2 = S5.mergeRemote({ '659887': { m: 'read', t: S5.getStamp('659887') - 5000 } });
+  assert(changed2.length === 0 && S5.get('659887') === 'skip', 'LWW: более старая облачная запись отклонена');
+  S5.mergeRemote({ '111': { m: null, t: now + 20000 } });
+  assert(S5.get('111') === null, 'облачный томбстоун (m:null) удаляет отметку локально');
+  const changed3 = S5.mergeRemote({ '222': { m: 'zzz', t: now } });
+  assert(changed3.length === 1 && S5.get('222') === null, 'невалидный m из облака не ломает чтение');
+
+  console.log('\n[10] Кодовая фраза: генерация, userId, шифрование');
+  const phrase = await import(pathToFileURL(path.join(EXT, 'shared', 'phrase.js')).href);
+  const gen = phrase.generatePhrase();
+  assert(gen.split(' ').length === phrase.PHRASE_WORDS, `генерация даёт ${phrase.PHRASE_WORDS} слов`);
+  assert(gen.split(' ').every((w) => phrase.WORDLIST.includes(w)), 'все слова из встроенного списка');
+  assert(phrase.validatePhrase(gen) === null, 'сгенерированная фраза валидна');
+  assert(phrase.validatePhrase('one two three') !== null, 'короткая фраза отклоняется');
+  assert(phrase.normalizePhrase('  Alpha   BETA  ') === 'alpha beta', 'нормализация регистра и пробелов');
+
+  const id1 = await phrase.deriveUserId('alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi');
+  const id1b = await phrase.deriveUserId('ALPHA   beta  gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi');
+  const id2 = await phrase.deriveUserId('один два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать');
+  assert(id1 === id1b, 'userId детерминирован (регистр/пробелы не важны)');
+  assert(/^[0-9a-f]{64}$/.test(id1), 'userId — hex длиной 64 (SHA-256)');
+  assert(id1 !== id2, 'разные фразы — разные userId');
+
+  const key1 = await phrase.deriveKey('моя очень секретная фраза из пятнадцати слов совсем секретная');
+  const enc1 = await phrase.encryptMark(key1, 'read');
+  assert((await phrase.decryptMark(key1, enc1)) === 'read', 'шифр/дешифр round-trip: read');
+  const enc2 = await phrase.encryptMark(key1, null);
+  assert((await phrase.decryptMark(key1, enc2)) === null, 'round-trip: томбстоун (null)');
+  const key2 = await phrase.deriveKey('чужая совершенно другая фраза из пятнадцати слов другая другая');
+  let wrongKeyFailed = false;
+  try {
+    await phrase.decryptMark(key2, enc1);
+  } catch (_) {
+    wrongKeyFailed = true;
+  }
+  assert(wrongKeyFailed, 'дешифрование чужой фразой падает (AES-GCM)');
+
+  console.log('\n[11] Синхронизация: content ↔ background (chrome-стаб)');
+  const dom6 = new JSDOM(HTML, { url: 'https://author.today/work/genre/fantasy', runScripts: 'outside-only', pretendToBeVisual: true });
+  const sentMsgs = [];
+  dom6.window.chrome = {
+    runtime: {
+      sendMessage: async (msg) => {
+        sentMsgs.push(msg);
+        if (msg.type === 'atr:sync:sync') {
+          return { ok: true, pull: { '999999': { m: 'read', t: Date.now() + 50000 } }, pushed: 0 };
+        }
+        return { ok: true };
+      }
+    }
+  };
+  for (const f of ['content/storage.js', 'content/sync.js', 'content/ui.js', 'content/dom.js', 'content/main.js']) {
+    dom6.window.eval(read(f));
+  }
+  await sleep(100);
+  assert(
+    sentMsgs.some((m) => m.type === 'atr:sync:sync' && m.entries),
+    'при старте страницы отправлен atr:sync:sync с локальным срезом'
+  );
+  assert(dom6.window.ATR.storage.get('999999') === 'read', 'облачная отметка из pull слита в localStorage');
+  assert(dom6.window.ATR.storage.getStamp('999999') > 0, 'у слитой отметки сохранена облачная метка времени');
+
+  // Локальный клик → debounce 1.5 с → повторный sync (push)
+  const p6 = dom6.window.document.querySelector('.book-title .atr-controls[data-atr-wid="659887"]');
+  p6.querySelector('.atr-plus').dispatchEvent(new dom6.window.MouseEvent('click', { bubbles: true, cancelable: true }));
+  await sleep(1800);
+  const syncMsgs = sentMsgs.filter((m) => m.type === 'atr:sync:sync');
+  assert(syncMsgs.length >= 2, 'после клика отправлен повторный sync (debounce push)');
+  assert(syncMsgs[1] && syncMsgs[1].entries['659887'] && syncMsgs[1].entries['659887'].m === 'read', 'в push ушла новая отметка');
 
   console.log(failures === 0 ? '\nВСЕ ТЕСТЫ ПРОЙДЕНЫ' : `\nПРОВАЛОВ: ${failures}`);
   process.exit(failures === 0 ? 0 : 1);

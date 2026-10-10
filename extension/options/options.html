@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Author.Today — отметки книг</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main class="wrap">
+    <h1>Author.Today — отметки книг</h1>
+
+    <!-- Блок предупреждений: конфиг не заполнен / ошибки -->
+    <section id="config-warning" class="card warning hidden">
+      <h2>Синхронизация не настроена</h2>
+      <p>
+        Не найден конфиг Firebase. Заполните файл <code>.env</code> в папке проекта
+        (значения из Firebase-консоли → Project settings → SDK setup) и выполните
+        в терминале <code>npm run config</code>, затем перезагрузите расширение.
+      </p>
+      <p class="muted">Без конфига расширение работает локально: отметки сохраняются в браузере, но не синхронизируются.</p>
+    </section>
+
+    <!-- Нет фразы: вход / создание -->
+    <section id="login-block" class="card hidden">
+      <h2>Кодовая фраза</h2>
+      <p class="muted">
+        Фраза из ~15 слов — это ваш «пароль» и ключ к отметкам. Введите её на
+        другом устройстве, и все записи восстановятся. <strong>Запишите фразу в
+        безопасное место: без неё доступ невосстановим.</strong>
+      </p>
+
+      <label for="phrase-input">Фраза (12–30 слов):</label>
+      <textarea id="phrase-input" rows="3" spellcheck="false" autocomplete="off"
+                placeholder="apple bridge cedar ..."></textarea>
+
+      <label id="confirm-label" class="checkbox hidden">
+        <input type="checkbox" id="confirm-check">
+        Я сохранил(а) сгенерированную фразу в безопасном месте
+      </label>
+
+      <div class="row">
+        <button id="btn-generate" type="button">Создать фразу</button>
+        <button id="btn-login" type="button" class="primary">Сохранить и войти</button>
+      </div>
+      <p id="login-error" class="error hidden"></p>
+    </section>
+
+    <!-- Есть фраза: статус -->
+    <section id="status-block" class="card hidden">
+      <h2>Синхронизация</h2>
+      <dl>
+        <dt>Пользователь (userId)</dt>
+        <dd><code id="user-id">—</code></dd>
+        <dt>Последняя синхронизация</dt>
+        <dd id="last-sync">никогда</dd>
+        <dt>Статус</dt>
+        <dd id="sync-state">—</dd>
+      </dl>
+      <p id="status-error" class="error hidden"></p>
+      <div class="row">
+        <button id="btn-sync" type="button" class="primary">Синхронизировать сейчас</button>
+        <button id="btn-logout" type="button" class="danger">Выйти (удалить фразу)</button>
+      </div>
+      <p class="muted">
+        «Выйти» удаляет фразу только с этого устройства — облачные отметки
+        останутся, доступ к ним даст повторный ввод фразы.
+      </p>
+    </section>
+  </main>
+  <script type="module" src="options.js"></script>
+</body>
+</html>

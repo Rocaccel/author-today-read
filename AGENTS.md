@@ -25,12 +25,18 @@ Chrome-расширение (Manifest V3) для сайта <https://author.toda
 Функциональные требования (со всеми согласованными правками):
 
 1. Элементы управления добавляются **рядом с названием книги в строке** (в заголовке).
-2. Хранение — **только локально** (`localStorage` страницы author.today), никаких
-   сетевых запросов и никакого chrome.storage.
-3. Popup у расширения **не нужен** — только индикаторы на страницах.
-4. Firebase — **заглушка** (модуль есть в структуре, как требует спецификация,
-   но не подключается и ничего не синхронизирует).
-5. Стек — **чистый JavaScript без сборки** (никаких npm/vite/esbuild/TypeScript).
+2. Хранение: **localStorage страницы — первичный кэш** (офлайн и работа без
+   входа), **синхронизация между устройствами — Firebase** (Firestore REST)
+   по кодовой фразе (v0.2.0, §8). Отметки хранятся ТОЛЬКО в localStorage;
+   в `chrome.storage.local` лежат лишь кодовая фраза и статусы синхронизации
+   (страница author.today их не читает).
+3. Popup у расширения **не нужен** — индикаторы на страницах + options-страница
+   (настройки/фраза/статус, §8.5).
+4. Firebase — **реальный REST-клиент** (`background/firebase.js`, v0.2.0);
+   конфиг подставляется из `.env` → `npm run config` (файлы в .gitignore,
+   секретов в репо нет).
+5. Стек — **чистый JavaScript без сборки** (никаких npm/vite/esbuild/TypeScript;
+   firebase-SDK не используется — только REST API по fetch).
 6. Подробные комментарии на русском в ключевых логических блоках (интеграция в DOM,
    обработчики кликов, хранение) — требование исходного ТЗ.
 
@@ -169,29 +175,52 @@ URL: `https://author.today/work/233831` — одиночная карточка 
 
 ---
 
-## 3. Спецификация хранения
+## 3. Спецификация хранения (v0.2.0: схема v2)
 
-- Бэкенд: **`window.localStorage` страницы author.today** (origin `https://author.today`).
-  Content script работает в isolated world того же origin — доступ к localStorage
-  общий с страницей. Это допустимо и намеренно (ключ свой, `atr.*`, конфликтов
-  с ключом сайта `theme` нет).
-- Ключ: **`atr.v1.marks`**
-- Формат: JSON-объект `workId (string) → mark`:
+### 3.1. Локальный кэш — `window.localStorage` страницы author.today
+
+- Content script работает в isolated world origin `https://author.today` —
+  доступ к localStorage общий с страницей. Собственный ключ с префиксом `atr.`,
+  конфликтов с ключом сайта `theme` нет.
+- Ключ: **`atr.v2.marks`** (v0.2.0 — новая схема; `atr.v1.marks` мигрируется).
+- Формат — объект отметок с метками времени (нужны для LWW-слияния с облаком):
 
 ```json
 {
-  "659887": "read",
-  "463277": "skip",
-  "644707": "read"
+  "659887": { "m": "read", "t": 1760160000000 },
+  "463277": { "m": "skip", "t": 1760160123456 },
+  "644707": { "m": null,  "t": 1760160234567 }
 }
 ```
 
-- `mark ∈ {"read", "skip"}`. Отсутствие ключа = нейтральное состояние (пусто).
-- Снятие отметки = **`delete obj[workId]`** + запись обратно (не хранить `null`).
+- `m ∈ {"read", "skip", null}`: `read`/`skip` — отметка; **`null` — томбстоун**
+  (снятие отметки). Томбстоуны НЕ удаляются из объекта: без них удаление
+  «воскресло» бы на другом устройстве при следующем pull.
+- `t` — epoch_ms последнего изменения (проставляется в `set`/`remove`).
+- Снятие отметки = запись `{ m: null, t: now }` (в v0.1.0 было `delete`).
 - Запись атомарная: прочитал весь объект → изменил одно поле → записал весь объект.
 - Повреждённый JSON — не ронять: считать пустым объектом и залогировать в консоль.
-- Кросс-табная синхронизация: слушать событие `storage` (window) — оно приходит
-  из других вкладок автоматически; обновлять индикаторы затронутого workId.
+- Кросс-табная синхронизация: событие `storage` (window) → перерисовка панелей
+  (подписка в content/dom.js).
+
+### 3.2. Миграция v1 → v2
+
+- Одноразовая, в `getAll()` (content/storage.js): нет ключа v2, но есть v1 →
+  `{workId: mark}` превращается в `{workId: {m: mark, t: Date.now()}}`,
+  значения вне `{read, skip}` отбрасываются; v2 записывается, **v1 удаляется**.
+
+### 3.3. Фраза и статусы — `chrome.storage.local` (background)
+
+- Ключи: `atr.sync.phrase` (нормализованная фраза), `atr.sync.userId`,
+  `atr.sync.lastSync`, `atr.sync.lastError`.
+- Фраза хранится ТОЛЬКО здесь (читает только расширение); в page localStorage
+  не попадает — сайт author.today её не видит.
+- Требует `"permissions": ["storage"]` в manifest.
+
+### 3.4. Облако — Firestore (см. §8)
+
+Путь `users/{userId}/marks/{workId}`, формат документа — §8.2.
+Отметки в облаке всегда шифрованные; ключ — только от кодовой фразы.
 
 ---
 
@@ -200,27 +229,39 @@ URL: `https://author.today/work/233831` — одиночная карточка 
 ```
 author-today-readed/
 ├── AGENTS.md                    ← этот файл (спецификация)
-├── README.md                    ← инструкция по установке для пользователя
-├── package.json                 ← ТОЛЬКО для тестов (jsdom devDependency + "npm test")
+├── README.md                    ← инструкция по установке и настройке Firebase
+├── .env                         ← конфиг Firebase (GITIGNORE, заполняет пользователь)
+├── package.json                 ← тесты + `npm run config` (jsdom devDependency)
+├── scripts/
+│   └── apply-config.js          ← .env → extension/background/config.js (npm run config)
 ├── tests/
-│   └── smoke.test.js            ← автотест в jsdom: инжект, кнопки, pjax, исключение плитки
+│   └── smoke.test.js            ← автотесты jsdom (инжект, семантика, v2, LWW, фраза, крипто, sync)
 └── extension/                   ← содержимое расширения (грузится в Chrome)
-    ├── manifest.json            ← MV3, без permissions (localStorage не требует)
+    ├── manifest.json            ← MV3: permissions storage, host_permissions firestore, options_ui
     ├── content/
-    │   ├── storage.js           ← модуль хранения (localStorage)
+    │   ├── storage.js           ← модуль хранения (localStorage, схема v2 + миграция + mergeRemote)
+    │   ├── sync.js              ← синхронизация: content ↔ background через chrome.runtime
     │   ├── ui.js                ← создание/обновление панели [+] [индикатор] [−]
     │   ├── dom.js               ← сканирование DOM, вставка, MutationObserver, pjax
-    │   ├── main.js              ← точка входа content script
+    │   ├── main.js              ← точка входа (sync.init + dom.start)
     │   └── styles.css           ← стили панели (light + dark)
+    ├── shared/
+    │   └── phrase.js            ← ES-модуль: кодовая фраза, userId, PBKDF2/AES-GCM (options + background)
+    ├── options/
+    │   ├── options.html         ← страница настроек (chrome://extensions → Настройки)
+    │   ├── options.js           ← генерация/ввод фразы, статус, ручная синхронизация, выход
+    │   └── options.css
     └── background/
-        ├── service-worker.js    ← ES-модуль, минимальная инициализация
-        └── firebase.js          ← ЗАГЛУШКА модуля Firebase (без подключения)
+        ├── service-worker.js    ← ES-модуль: роутер сообщений + хранилище фразы
+        ├── firebase.js          ← Firestore REST-клиент (list + batchWrite + sync)
+        └── config.js            ← ГЕНЕРИРУЕТСЯ из .env (GITIGNORE, в свежем клоне отсутствует)
 ```
 
 ### 4.1. Правила сборки/подключения
 
-- **Никакой сборки.** Content script — четыре *классических* скрипта, подключаются
-  в manifest **строго в порядке**: `storage.js → ui.js → dom.js → main.js`.
+- **Никакой сборки.** Content script — пять *классических* скриптов,
+  подключаются в manifest **строго в порядке**:
+  `storage.js → sync.js → ui.js → dom.js → main.js`.
   Все они выполняются в одном isolated world и общаются через глобальное
   пространство `globalThis.ATR`:
 
@@ -233,25 +274,71 @@ author-today-readed/
 })();
 ```
 
-- Background — **ES-модуль** (`"type": "module"` в manifest), оттуда импортируется
-  `firebase.js`.
-- `permissions` в manifest отсутствуют (не нужны), `host_permissions` —
-  `https://author.today/*` не требуется для content_scripts с `matches`.
+- Background — **ES-модуль** (`"type": "module"` в manifest). Импортирует
+  `./firebase.js` и `../shared/phrase.js` (общий с options). `./config.js`
+  подгружается **динамическим** `import()` с catch — файла может не быть
+  в свежем клоне (он в .gitignore), расширение обязано работать без него
+  (синхронизация просто выключена, `isReady() === false`).
+- Options-страница — `<script type="module">`, тоже импортирует `../shared/phrase.js`.
+- `permissions`: `["storage"]` (chrome.storage.local для фразы/статусов).
+  `host_permissions`: `["https://firestore.googleapis.com/*"]` (fetch из background).
 
 ### 4.2. Контракты модулей (сигнатуры, которые обязаны соблюдаться)
 
-**`content/storage.js` → `ATR.storage`**
+**`content/storage.js` → `ATR.storage`** (схема v2, §3.1)
 
 | функция | сигнатура | что делает |
 |---|---|---|
-| `getAll()` | `() → Object` | весь объект отметок (повреждённый JSON → `{}`) |
-| `get(workId)` | `(string) → "read"\|"skip"\|null` | текущая отметка |
-| `set(workId, mark)` | `(string, "read"\|"skip") → void` | поставить отметку |
-| `remove(workId)` | `(string) → void` | удалить запись (нейтральное состояние) |
-| `toggle(workId, mark)` | `(string, "read"\|"skip") → "read"\|"skip"\|null` | семантика §1.1: если стоит такая же — снять, иначе — заменить. После изменения шлёт `document` событие `'atr:changed'` с `{detail:{workId}}` |
+| `getAll()` | `() → Object` | весь объект `{wid: {m, t}}` (после миграции v1; повреждённый JSON → `{}`) |
+| `get(workId)` | `(string) → "read"\|"skip"\|null` | текущая отметка (томбстоун/нет записи → null) |
+| `getStamp(workId)` | `(string) → number` | epoch_ms последнего изменения, 0 если нет записи |
+| `set(workId, mark)` | `(string, "read"\|"skip") → void` | запись `{m, t: Date.now()}` |
+| `remove(workId)` | `(string) → void` | **томбстоун** `{m: null, t}` (не `delete`); уже томбстоун → no-op |
+| `toggle(workId, mark)` | `(string, "read"\|"skip") → "read"\|"skip"\|null` | семантика §1.1; после изменения шлёт `document` событие `'atr:changed'` с `{detail:{workId}}` |
+| `mergeRemote(remote)` | `(Object) → string[]` | LWW-слияние облачных данных: принимает запись, если её `t` **больше** локального; возвращает список изменившихся workId |
 
-Константы: `ATR.storage.KEY = 'atr.v1.marks'`, `ATR.storage.MARK_READ = 'read'`,
-`ATR.storage.MARK_SKIP = 'skip'`.
+Константы: `ATR.storage.KEY_V2 = 'atr.v2.marks'`, `KEY_V1 = 'atr.v1.marks'`,
+`MARK_READ = 'read'`, `MARK_SKIP = 'skip'`.
+
+**`content/sync.js` → `ATR.sync`**
+
+| функция | что делает |
+|---|---|
+| `isSupported()` | есть ли `chrome.runtime.sendMessage` (в тестах может отсутствовать) |
+| `init()` | подписка на `'atr:changed'` (debounce push 1.5 с), `focus` окна (pull не чаще 30 с) + первый `syncNow()` при загрузке страницы |
+| `syncNow()` | один round-trip: шлёт `{type:'atr:sync:sync', entries: getAll()}` → принимает `res.pull` → `storage.mergeRemote()` → `ui.renderAll(wid)` (БЕЗ события `atr:changed`, чтобы не зациклить push). Одновременно только один запрос (inFlight + pending). Ошибки/`skip` — молча, локальная работа продолжается |
+
+**`shared/phrase.js` (ES-модуль, options + background)**
+
+| экспорт | что делает |
+|---|---|
+| `WORDLIST`, `PHRASE_WORDS=15`, `MIN_WORDS=12`, `MAX_WORDS=30` | встроенный список из 128 слов и лимиты |
+| `generatePhrase(n?)` | 15 случайных слов через `crypto.getRandomValues` |
+| `normalizePhrase(s)` | lowercase + trim + схлопывание пробелов |
+| `validatePhrase(s)` | null если ок, иначе текст ошибки (12–30 слов) |
+| `deriveUserId(phrase)` | `hex(SHA-256(normalize(phrase)))` — userId, путь в БД |
+| `deriveKey(phrase)` | PBKDF2-SHA256(соль `"atr.sync.v1"`, 100k) → AES-GCM-256 CryptoKey |
+| `encryptMark(key, mark)` | `{v, iv, ct}` (base64); iv — 12 случайных байт |
+| `decryptMark(key, payload)` | обратно `"read"\|"skip"\|null`; неверный ключ → исключение |
+
+**`background/firebase.js` (ES-модуль, реальный REST-клиент)**
+
+| функция | что делает |
+|---|---|
+| `loadConfig()` | кэшированный `import('./config.js')` с catch → `{config, ready}` (файла может не быть) |
+| `initFirebase(config)` → клиент | `isReady()` (apiKey+projectId), `pullDocs(userId)` (GET list; 404 → `[]`), `sync(userId, phrase, localEntries)` → `{pull, pushed, skipped}`: расшифровывает облако, пушит локальное новее облака (batchWrite), возвращает облачное новее локального. Ошибки HTTP — исключение со свойством `status` |
+
+**`background/service-worker.js` (роутер `chrome.runtime.onMessage`)**
+
+| сообщение | вход → выход |
+|---|---|
+| `atr:status` | `→ {ok, configReady, hasPhrase, userId, lastSync, lastError, ready}` |
+| `atr:phrase:set` | `{phrase}` → валидация, `deriveUserId`, сохранение в `chrome.storage.local` → `{ok, userId}` / `{ok:false, error}` |
+| `atr:phrase:clear` | `→ {ok}` (удаляет фразу/userId/ошибку) |
+| `atr:sync:sync` | `{entries}` → полный round-trip с Firestore → `{ok, pull, pushed, skipped}` либо `{ok:false, skip:true, reason:'config'\|'phrase'}` (не ошибка!) либо `{ok:false, error}` (сеть/правила, текст сохраняется в `atr.sync.lastError`) |
+
+`options/options.js` — чистый UI: `generatePhrase/validatePhrase/normalizePhrase`
+из shared + те же 4 сообщения; локальных данных не хранит.
 
 **`content/ui.js` → `ATR.ui`**
 
@@ -281,40 +368,25 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 Идемпотентность — ключевое: повторные `scan()` **не должны дублировать** панели
 (проверка `target.querySelector('[data-atr-wid]')`).
 
-**`background/firebase.js` (заглушка, экспорт ES-модуля)**
-
-| функция | что делает |
-|---|---|
-| `initFirebase(config)` | ничего не делает, логирует намерение, возвращает объект-заглушку |
-| `pushMarks(marks)` | no-op, комментарий «реализация появится при подключении проекта Firebase» |
-| `pullMarks()` | no-op, возвращает `null` (нет удалённых данных) |
-
-Имя/интерфейс оставить ровно таким — это точка расширения, противоречие п.2 ТЗ
-«хранить только локально» разрешено так: **данные всегда читаются/пишутся только
-в localStorage, Firebase-модуль в схему хранения не вмешивается**.
-
-**`background/service-worker.js`**
-
-Импортирует `initFirebase` из `./firebase.js`, вызывает с пустым конфигом
-(комментарий, куда вписать реальные ключи), вешает `chrome.runtime.onInstalled`
-для лога установки. Больше ничего (popup нет, сообщений от content script нет).
-
-### 4.3. Структура manifest.json
+### 4.3. Структура manifest.json (v0.2.0)
 
 ```json
 {
   "manifest_version": 3,
   "name": "Author.Today — отметки книг",
-  "version": "0.1.0",
-  "description": "Отметки ✅/❌ рядом с названиями книг в списках и таблицах поиска и каталога, а также в заголовке страницы книги.",
+  "version": "0.2.0",
+  "description": "Отметки ✅/❌ рядом с названиями книг в списках, таблицах и на странице книги. Синхронизация между устройствами через Firebase по кодовой фразе.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://firestore.googleapis.com/*"],
   "content_scripts": [
     {
       "matches": ["https://author.today/*"],
-      "js": ["content/storage.js", "content/ui.js", "content/dom.js", "content/main.js"],
+      "js": ["content/storage.js", "content/sync.js", "content/ui.js", "content/dom.js", "content/main.js"],
       "css": ["content/styles.css"],
       "run_at": "document_idle"
     }
   ],
+  "options_ui": { "page": "options/options.html", "open_in_tab": true },
   "background": { "service_worker": "background/service-worker.js", "type": "module" }
 }
 ```
@@ -346,9 +418,11 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 0. **Автотесты** (нужен Node.js): из корня проекта `npm install` (один раз) →
    `npm test`. Тест `tests/smoke.test.js` в jsdom проверяет: инжект в строку и
    таблицу, отсутствие панелей в плитке и на чужих страницах, полную семантику
-   кнопок (§1.1), хранилище `atr.v1.marks`, появление панелей после `pjax:end`,
-   страницу книги (панель внутри `h1.book-title`, общую отметку со списком).
-   Все проверки должны быть `ok`, итог «ВСЕ ТЕСТЫ ПРОЙДЕНЫ».
+   кнопок (§1.1), схему хранилища v2 и миграцию v1→v2, LWW-слияние с томбстоунами,
+   страницу книги (панель внутри `h1.book-title`), генерацию/валидацию фразы,
+   детерминированный userId, round-trip AES-GCM (чужой ключ падает), sync-протокол
+   content↔background (chrome-стаб). Все проверки должны быть `ok`, итог
+   «ВСЕ ТЕСТЫ ПРОЙДЕНЫ».
 1. `chrome://extensions` → режим разработчика → «Загрузить распакованное
    расширение» → папка `extension/`. Без ошибок в manifest.
 2. Открыть `https://author.today/work/genre/fantasy` (вид «строки» по умолчанию):
@@ -370,8 +444,19 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 11. Страница главная `/`, `/u/...`, разделы `/work/genre/...` (без панели на
     своём заголовке раздела) — панелей на их заголовках **нет**; у строк
     каталога панели остаются (область §1.2).
-12. Console (F12): нет ошибок/спама; `localStorage.getItem('atr.v1.marks')` — валидный JSON.
-13. Синтаксис: `node --check` для каждого content/*.js и background/*.js.
+12. Console (F12): нет ошибок/спама; `localStorage.getItem('atr.v2.marks')` — валидный JSON.
+13. Синтаксис: `node --check` для content/*.js и tests; для ES-модулей
+    (shared/background/options) — `node --check` копии с расширением `.mjs`.
+14. **Миграция**: открыть страницу со старыми данными `atr.v1.marks` → после
+    загрузки ключ v1 удалён, `atr.v2.marks` содержит `{m, t}`, отметки читаются.
+15. **Конфиг**: `npm run config` создаёт `extension/background/config.js`;
+    `git status` не показывает `.env` и `config.js` (в .gitignore).
+16. **Options**: «Создать фразу» → чекбокс → вход; статус показывает userId
+    (64 hex) и время; без фразы контент-скрипт работает локально без ошибок.
+17. **Синхронизация** (ручная, после настройки конфига): два браузера с одной
+    фразой → отметка в одном появляется в другом (дождаться push/pull: клик →
+    ~1.5 с → открыть/фокус на второй вкладке); «Выйти» удаляет фразу с устройства,
+    облачные данные остаются.
 
 ---
 
@@ -382,9 +467,110 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
   расширение и не влияет на его работу.)
 - **Секретов нет**: в репозитории не должно появиться реальных ключей Firebase
   или других токенов — конфиг в `background/firebase.js` остаётся пустым.
-- Не добавлять chrome.storage / сетевые запросы / реальный Firebase без нового
-  запроса пользователя.
+- Не добавлять chrome.storage / сетевые запросы / реальный Firebase **без
+  нового запроса пользователя**. (Запрос получен: v0.2.0 — `storage` только
+  для фразы/статусов, сети только к `firestore.googleapis.com` из background,
+  конфиг через `.env` → `config.js`, оба файла в .gitignore — §8.4.)
+- Не добавлять firebase-SDK/bundler — только REST API по `fetch` (§8.1).
 - Не ставить панели в плитку `.bookcard` и на страницы вне `/search*` и `/work*`.
 - Не модифицировать код самого сайта (никаких переопределений `app.*`, только
   наблюдение и добавление своих узлов с префиксом `atr-`).
-- Не менять ключ хранилища без миграции (`atr.v1.*` — версионировать).
+- Не менять ключ хранилища без миграции (`atr.*` — версионировать; так была
+  сделана миграция `atr.v1.marks` → `atr.v2.marks`, §3.2).
+- **Секреты конфига**: `.env` и `extension/background/config.js` — в `.gitignore`,
+  НИКОГДА не коммитить и не запушить (включая содержимое в других файлах).
+  В репозитории допустимы только пустые заглушки и инструкции.
+
+---
+
+## 8. Синхронизация с Firebase (v0.2.0)
+
+### 8.1. Архитектура
+
+```
+[страница author.today]                       [background SW]              [Firestore]
+content/storage.js (кэш v2)  atr:sync:sync   service-worker.js   list/batchWrite
+content/sync.js ──────────────────────────►  firebase.js  ─────────────────►  users/{uid}/marks/*
+        ▲                                       │ sha256/pbkdf2/aes
+        └── merge LWW (pull) ◄─────────────────┘ из chrome.storage.local
+                 options/options.js ── те же 4 сообщения ──►
+```
+
+- **Сеть только в background** (CORS расширения, `host_permissions`); content
+  шлёт готовый срез `{wid:{m,t}}` и получает готовый pull.
+- **Один round-trip `atr:sync:sync`**: pull облака → сравнение по `t` (LWW) →
+  push локального новее → вернуть облачное новее локального → `mergeRemote`.
+- Триггеры: загрузка любой страницы сайта, debounce 1.5 с после клика,
+  фокус окна (не чаще 30 с), ручная кнопка в options.
+- **Тишина при ошибке**: нет конфига/фразы/сети → локальная работа продолжается
+  без ошибок в консоль; детали — `atr.sync.lastError` (видны в options).
+- Прочего фонового трафика нет: `chrome.alarms` не используется, popup нет.
+
+### 8.2. Модель данных и правила
+
+```
+users/{userId}/marks/{workId} {
+  updatedAt: integer,   // ОТКРЫТО — по нему идёт LWW-слияние на клиенте
+  v: "1", iv: string,   // ОТКРЫТО — версия схемы и nonce (base64)
+  ct:  string           // шифротекст JSON {m: "read"|"skip"|null} (base64)
+}
+```
+
+- `userId = hex(SHA-256(нормализованной фразы))` — детерминирован, одинаков
+  на всех устройствах с одной фразой.
+- Правила Firestore (пользователь настраивает в консоли, сниппет в README):
+
+```
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId}/marks/{workId} {
+      allow read, write: if true;  // контент зашифрован ключом от фразы
+    }
+  }
+}
+```
+
+- REST (без SDK, без сборки):
+  - pull: `GET https://firestore.googleapis.com/v1/projects/{pid}/databases/(default)/documents/users/{uid}/marks?key={apiKey}` — пустая коллекция отвечает `404 NOT_FOUND` → «данных нет»;
+  - push: `POST .../documents:batchWrite?key={apiKey}` — `{writes:[{update:{name, fields}}]}`, максимум одна запись на документ в батче.
+
+### 8.3. Криптография (shared/phrase.js)
+
+- Фраза: 15 слов из встроенного списка 128 (`generatePhrase`) или своя
+  (12–30 слов, `validatePhrase`); нормализация — lowercase/trim/пробелы.
+- `userId = SHA-256(фраза)`; ключ = `PBKDF2-SHA256(фраза, "atr.sync.v1", 100000)`
+  → AES-GCM-256; iv — 12 байт на запись.
+- Свойство: **без фразы облако нечитаемо** — отсюда открытые правила §8.2.
+- Чужая фраза на своём устройстве: расшифровка падает → запись попадает в
+  счётчик `skipped` и не мешает остальным.
+
+### 8.4. Конфигурация: `.env` → `config.js`
+
+1. Пользователь заполняет `.env` (шаблон в корне; поля из Firebase-консоли:
+   Project settings → SDK setup and configuration → Config).
+2. `npm run config` (`scripts/apply-config.js`) → `extension/background/config.js`
+   (`export const firebaseConfig`, `export const firebaseConfigReady`).
+3. Оба файла в `.gitignore`. Свежий клон без конфига — рабочее расширение,
+   `loadConfig()` ловит отсутствие `import()` и возвращает `ready:false`.
+4. Минимум для работы: `FIREBASE_API_KEY` + `FIREBASE_PROJECT_ID`.
+
+### 8.5. Options-страница (`chrome://extensions` → «Настройки»)
+
+- Нет конфига → предупреждение с инструкцией (§8.4).
+- Нет фразы → «Создать фразу» (обязательный чекбокс «я сохранил») или ввод
+  своей → «Сохранить и войти» (`atr:phrase:set`).
+- Есть фраза → userId, последняя синхронизация, статус, «Синхронизировать
+  сейчас» (`atr:sync:sync` с пустым `entries` — pull+проверка связи;
+  дошлёт локальное только content-вкладка), «Выйти» (`atr:phrase:clear`).
+
+### 8.6. Сценарии
+
+- **Первое устройство**: заполнить `.env` → `npm run config` → загрузить
+  расширение → options → «Создать фразу» → сохранить фразу → кликать отметки,
+  они уходят в облако (push после клика).
+- **Второе устройство**: настроить тот же конфиг → ввести ту же фразу →
+  открыть author.today → pull затянет отметки, дальше LWW.
+- **Потеря/смена фразы**: старая фраза неизвестна → облако нечитаемо
+  (можно только затереть запись новой фразой — LWW по времени перетрёт).
+  Хранить фразу в безопасном месте — единственный способ доступа.

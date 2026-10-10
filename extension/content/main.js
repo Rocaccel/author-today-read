@@ -16,6 +16,9 @@
       console.error('[ATR] модули не загружены, порядок подключения нарушен:', Object.keys(ATR));
       return;
     }
+    // Синхронизация с Firebase — независимо от страницы: подтягиваем облако
+    // сразу (работает и на главной, вне /search* и /work*).
+    if (ATR.sync) ATR.sync.init();
     // Вне /search* и /work* ничего не делаем (см. AGENTS.md §1.2).
     if (!ATR.dom.isEnabledPage()) return;
     ATR.dom.start();

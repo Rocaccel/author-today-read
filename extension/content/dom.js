@@ -171,7 +171,7 @@
 
     // 4) Изменение отметки в ДРУГОЙ вкладке: нативное событие `storage`.
     window.addEventListener('storage', (e) => {
-      if (e.key === null || e.key === ATR.storage.KEY) renderExisting();
+      if (e.key === null || e.key === ATR.storage.KEY_V2) renderExisting();
     });
   }
 
