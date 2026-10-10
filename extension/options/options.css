@@ -138,6 +138,24 @@ button:disabled {
   margin: 8px 0 0;
 }
 
+.phrase-box {
+  margin-top: 4px;
+  padding: 8px;
+  background: #eceff1;
+  border-radius: 6px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-all;
+  user-select: all; /* выделяется целиком для ручного копирования */
+}
+
+.phrase-box.masked {
+  color: #90a4ae;
+  letter-spacing: 2px;
+  user-select: none; /* маску копировать бессмысленно */
+}
+
 dl {
   margin: 8px 0;
 }

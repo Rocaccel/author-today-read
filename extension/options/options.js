@@ -15,6 +15,9 @@ const $ = (id) => document.getElementById(id);
 const send = (msg) => chrome.runtime.sendMessage(msg);
 
 let generatedThisSession = false; // фразу сгенерировали здесь — требуем подтверждение
+let currentPhrase = null; // фраза из atr:status (для показа/копирования)
+let phraseVisible = false; // раскрыли фразу кнопкой «Показать»
+const PHRASE_MASK = '•••• •••• •••• •••• ••••';
 
 /** Показать/скрыть блок. */
 function show(el, visible) {
@@ -31,11 +34,26 @@ function formatTime(iso) {
   }
 }
 
+/** Отрисовка блока показа фразы: маска или текст + состояние кнопок. */
+function renderPhrase() {
+  const box = $('phrase-text');
+  box.textContent = currentPhrase ? (phraseVisible ? currentPhrase : PHRASE_MASK) : '—';
+  box.classList.toggle('masked', !!currentPhrase && !phraseVisible);
+  $('btn-show').textContent = phraseVisible ? 'Скрыть' : 'Показать';
+  $('btn-show').disabled = !currentPhrase;
+  $('btn-copy').disabled = !currentPhrase;
+}
+
 /** Полный рендер по статусу из background. */
 function renderStatus(status) {
   show($('config-warning'), !status.configReady);
   show($('login-block'), status.configReady && !status.hasPhrase);
   show($('status-block'), status.hasPhrase);
+
+  // Фраза приходит из atr:status; маскируем по умолчанию (см. §8.5 AGENTS.md)
+  currentPhrase = status.phrase || null;
+  if (!currentPhrase) phraseVisible = false;
+  renderPhrase();
 
   if (status.hasPhrase) {
     $('user-id').textContent = status.userId || '—';
@@ -125,6 +143,28 @@ async function onSyncNow() {
   }
 }
 
+/** Показать/скрыть фразу текстом (маска по умолчанию). */
+function onShowPhrase() {
+  if (!currentPhrase) return;
+  phraseVisible = !phraseVisible;
+  renderPhrase();
+}
+
+/** Скопировать фразу в буфер обмена (extension-origin → clipboard API). */
+async function onCopyPhrase() {
+  if (!currentPhrase) return;
+  const btn = $('btn-copy');
+  try {
+    await navigator.clipboard.writeText(currentPhrase);
+    btn.textContent = 'Скопировано';
+  } catch (_) {
+    btn.textContent = 'Ошибка копирования';
+  }
+  setTimeout(() => {
+    btn.textContent = 'Копировать';
+  }, 1500);
+}
+
 /** Выход: фраза удаляется с устройства. */
 async function onLogout() {
   await send({ type: 'atr:phrase:clear' });
@@ -134,6 +174,8 @@ async function onLogout() {
 
 $('btn-generate').addEventListener('click', onGenerate);
 $('btn-login').addEventListener('click', onLogin);
+$('btn-show').addEventListener('click', onShowPhrase);
+$('btn-copy').addEventListener('click', onCopyPhrase);
 $('btn-sync').addEventListener('click', onSyncNow);
 $('btn-logout').addEventListener('click', onLogout);
 

@@ -50,6 +50,9 @@ async function handleStatus() {
     ok: true,
     configReady,
     hasPhrase: !!phrase,
+    // Фразу отдаём options-странице (extension-origin): там есть кнопки
+    // «Показать»/«Копировать» (см. §8.5). Страница author.today её не видит.
+    phrase: phrase || null,
     userId: userId || null,
     lastSync: data[K_LAST_SYNC] || null,
     lastError: data[K_LAST_ERROR] || null,

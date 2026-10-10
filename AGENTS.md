@@ -337,7 +337,7 @@ author-today-readed/
 
 | сообщение | вход → выход |
 |---|---|
-| `atr:status` | `→ {ok, configReady, hasPhrase, userId, lastSync, lastError, ready}` |
+| `atr:status` | `→ {ok, configReady, hasPhrase, phrase, userId, lastSync, lastError, ready}` (`phrase` — для кнопок Показать/Копировать в options, §8.5) |
 | `atr:phrase:set` | `{phrase}` → валидация, `deriveUserId`, сохранение в `chrome.storage.local` → `{ok, userId}` / `{ok:false, error}` |
 | `atr:phrase:clear` | `→ {ok}` (удаляет фразу/userId/ошибку) |
 | `atr:sync:sync` | `{entries}` → полный round-trip с Realtime Database → `{ok, pull, pushed, skipped}` либо `{ok:false, skip:true, reason:'config'\|'phrase'}` (не ошибка!) либо `{ok:false, error}` (сеть/правила, текст сохраняется в `atr.sync.lastError`) |
@@ -458,7 +458,9 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
     создаёт `extension/background/config.json`; `git status` не показывает
     `.env` и `config.json` (в .gitignore).
 16. **Options**: «Создать фразу» → чекбокс → вход; статус показывает userId
-    (64 hex) и время; без фразы контент-скрипт работает локально без ошибок.
+    (64 hex) и время; фраза замаскирована, «Показать» раскрывает/прячет,
+    «Копировать» кладёт её в буфер («Скопировано»); без фразы контент-скрипт
+    работает локально без ошибок.
 17. **Синхронизация** (ручная, после настройки конфига): правила RTDB
     вставлены (Rules → Publish); два браузера с одной
     фразой → отметка в одном появляется в другом (дождаться push/pull: клик →
@@ -582,9 +584,14 @@ users/{userId}/marks/{workId} → {
 - Нет конфига → предупреждение с инструкцией (§8.4).
 - Нет фразы → «Создать фразу» (обязательный чекбокс «я сохранил») или ввод
   своей → «Сохранить и войти» (`atr:phrase:set`).
-- Есть фраза → userId, последняя синхронизация, статус, «Синхронизировать
+- Есть фраза → userId, последняя синхронизация, статус, блок «Кодовая фраза»
+  (маска `•••• …` по умолчанию; кнопки **«Показать»** — раскрывает/прячет текст,
+  **«Копировать»** — `navigator.clipboard.writeText`, фидбек «Скопировано» на
+  1.5 с; фразу отдаёт `atr:status` → поле `phrase`; виден только на
+  options-странице, страница author.today его не получает), «Синхронизировать
   сейчас» (`atr:sync:sync` с пустым `entries` — pull+проверка связи;
   дошлёт локальное только content-вкладка), «Выйти» (`atr:phrase:clear`).
+  Фраза нужна в любой момент: потеря = потеря доступа к облаку (§8.6).
 
 ### 8.6. Сценарии
 
