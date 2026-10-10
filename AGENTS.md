@@ -233,7 +233,7 @@ author-today-readed/
 ├── .env                         ← конфиг Firebase (GITIGNORE, заполняет пользователь)
 ├── package.json                 ← тесты + `npm run config` (jsdom devDependency)
 ├── scripts/
-│   └── apply-config.js          ← .env → extension/background/config.js (npm run config)
+│   └── apply-config.js          ← .env → extension/background/config.json (npm run config)
 ├── tests/
 │   └── smoke.test.js            ← автотесты jsdom (инжект, семантика, v2, LWW, фраза, крипто, sync)
 └── extension/                   ← содержимое расширения (грузится в Chrome)
@@ -254,7 +254,7 @@ author-today-readed/
     └── background/
         ├── service-worker.js    ← ES-модуль: роутер сообщений + хранилище фразы
         ├── firebase.js          ← Realtime Database REST-клиент (GET/PATCH .json + sync)
-        └── config.js            ← ГЕНЕРИРУЕТСЯ из .env (GITIGNORE, в свежем клоне отсутствует)
+        └── config.json          ← ГЕНЕРИРУЕТСЯ из .env (GITIGNORE, в свежем клоне отсутствует)
 ```
 
 ### 4.1. Правила сборки/подключения
@@ -275,10 +275,15 @@ author-today-readed/
 ```
 
 - Background — **ES-модуль** (`"type": "module"` в manifest). Импортирует
-  `./firebase.js` и `../shared/phrase.js` (общий с options). `./config.js`
-  подгружается **динамическим** `import()` с catch — файла может не быть
-  в свежем клоне (он в .gitignore), расширение обязано работать без него
-  (синхронизация просто выключена, `isReady() === false`).
+  `./firebase.js` и `../shared/phrase.js` (общий с options). `config.json`
+  читается **fetch(chrome.runtime.getURL('background/config.json'))** — файла
+  может не быть в свежем клоне (он в .gitignore), fetch отклоняется → catch →
+  пустой конфиг; расширение обязано работать без него (синхронизация просто
+  выключена, `isReady() === false`). **ЗАПРЕЩЁН динамический `import()`**
+  внутри ServiceWorkerGlobalScope — спецификация HTML его не разрешает
+  (w3c/ServiceWorker#1356), в реальном Chrome всегда падает (в Node/тестах —
+  работает, поэтому баг не ловится тестами; исторически привёл к багу v0.2.0).
+  Options-странице конфиг не нужен — статус приходит по `atr:status`.
 - Options-страница — `<script type="module">`, тоже импортирует `../shared/phrase.js`.
 - `permissions`: `["storage"]` (chrome.storage.local для фразы/статусов).
   `host_permissions`: `["https://*.firebasedatabase.app/*"]` (fetch из background).
@@ -325,7 +330,7 @@ author-today-readed/
 
 | функция | что делает |
 |---|---|
-| `loadConfig()` | кэшированный `import('./config.js')` с catch → `{config, ready}` (файла может не быть) |
+| `loadConfig()` | кэшированный `fetch(chrome.runtime.getURL('background/config.json'))` (`.ok ? json : {}`, catch → пустой конфиг) → `{config, ready}` (ready = `!!databaseURL`; файла может не быть) |
 | `initFirebase(config)` → клиент | `isReady()` (databaseURL), `pullDocs(userId)` (GET `{db}/users/{uid}/marks.json`; пустое дерево → `null` → `[]`), `sync(userId, phrase, localEntries)` → `{pull, pushed, skipped}`: расшифровывает облако, пушит локальное новее облака одним `PATCH` (RTDB мержит ветки), возвращает облачное новее локального. Ошибки HTTP — исключение со свойством `status` |
 
 **`background/service-worker.js` (роутер `chrome.runtime.onMessage`)**
@@ -450,8 +455,8 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 14. **Миграция**: открыть страницу со старыми данными `atr.v1.marks` → после
     загрузки ключ v1 удалён, `atr.v2.marks` содержит `{m, t}`, отметки читаются.
 15. **Конфиг**: в `.env` заполнен `FIREBASE_DATABASE_URL` → `npm run config`
-    создаёт `extension/background/config.js`; `git status` не показывает
-    `.env` и `config.js` (в .gitignore).
+    создаёт `extension/background/config.json`; `git status` не показывает
+    `.env` и `config.json` (в .gitignore).
 16. **Options**: «Создать фразу» → чекбокс → вход; статус показывает userId
     (64 hex) и время; без фразы контент-скрипт работает локально без ошибок.
 17. **Синхронизация** (ручная, после настройки конфига): правила RTDB
@@ -468,18 +473,21 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
   `jsdom` как **devDependency** для `tests/smoke.test.js`: он не попадает в
   расширение и не влияет на его работу.)
 - **Секретов нет**: в репозитории не должно появиться реальных ключей Firebase
-  или других токенов — конфиг живёт только в `.env`/`config.js` (gitignore).
+  или других токенов — конфиг живёт только в `.env`/`config.json` (gitignore).
 - Не добавлять chrome.storage / сетевые запросы / реальный Firebase **без
   нового запроса пользователя**. (Запрос получен: v0.2.0 — `storage` только
   для фразы/статусов, сети только к `*.firebasedatabase.app` из background,
-  конфиг через `.env` → `config.js`, оба файла в .gitignore — §8.4.)
+  конфиг через `.env` → `config.json`, оба файла в .gitignore — §8.4.)
 - Не добавлять firebase-SDK/bundler — только REST API по `fetch` (§8.1).
+- Не использовать динамический `import()` в background SW (ServiceWorkerGlobalScope):
+  запрещён спецификацией HTML (w3c/ServiceWorker#1356) — только статические
+  импорты и `fetch` (§4.1, §8.4).
 - Не ставить панели в плитку `.bookcard` и на страницы вне `/search*` и `/work*`.
 - Не модифицировать код самого сайта (никаких переопределений `app.*`, только
   наблюдение и добавление своих узлов с префиксом `atr-`).
 - Не менять ключ хранилища без миграции (`atr.*` — версионировать; так была
   сделана миграция `atr.v1.marks` → `atr.v2.marks`, §3.2).
-- **Секреты конфига**: `.env` и `extension/background/config.js` — в `.gitignore`,
+- **Секреты конфига**: `.env` и `extension/background/config.json` — в `.gitignore`,
   НИКОГДА не коммитить и не запушить (включая содержимое в других файлах).
   В репозитории допустимы только пустые заглушки и инструкции.
 
@@ -555,17 +563,19 @@ users/{userId}/marks/{workId} → {
 - Чужая фраза на своём устройстве: расшифровка падает → запись попадает в
   счётчик `skipped` и не мешает остальным.
 
-### 8.4. Конфигурация: `.env` → `config.js`
+### 8.4. Конфигурация: `.env` → `config.json`
 
 1. Пользователь заполняет `.env` (шаблон в корне): формат `KEY=VALUE` либо
    вставленный целиком JS-блок `const firebaseConfig = {...}` из
    Firebase-консоли (Project settings → SDK setup) — скрипт разбирает оба.
-2. `npm run config` (`scripts/apply-config.js`) → `extension/background/config.js`
-   (`export const firebaseConfig`, `export const firebaseConfigReady`).
-3. Оба файла в `.gitignore`. Свежий клон без конфига — рабочее расширение,
-   `loadConfig()` ловит отсутствие `import()` и возвращает `ready:false`.
+2. `npm run config` (`scripts/apply-config.js`) → `extension/background/config.json`
+   (JSON-объект `{apiKey, projectId, databaseURL, ...}`).
+3. Оба файла в `.gitignore`. Свежий клон без конфига — рабочее расширение:
+   `loadConfig()` (firebase.js) делает `fetch(chrome.runtime.getURL(...))`,
+   файл отсутствует → catch → пустой конфиг, `ready: false`.
+   **Формат JSON, не ES-модуль**: динамический `import()` запрещён в SW (§4.1).
 4. Минимум для работы: `FIREBASE_DATABASE_URL` (Realtime Database; готовность
-   `firebaseConfigReady = !!databaseURL`).
+   вычисляется как `!!config.databaseURL`).
 
 ### 8.5. Options-страница (`chrome://extensions` → «Настройки»)
 

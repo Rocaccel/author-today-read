@@ -1,14 +1,16 @@
 /**
- * apply-config.js — читает .env и генерирует extension/background/config.js.
+ * apply-config.js — читает .env и генерирует extension/background/config.json.
  *
  * Зачем: ключи Firebase должны попасть внутрь расширения (браузер не умеет
  * читать .env), при этом они НЕ должны попадать в git. Решение:
- *   .env (gitignore, вы заполняете) → npm run config → config.js (тоже gitignore)
+ *   .env (gitignore, вы заполняете) → npm run config → config.json (тоже gitignore)
  *
  * Запуск из корня проекта:  npm run config
  *
- * Это НЕ сборка (bundle) — просто копирование значений в ES-модуль,
- * никаких зависимостей кроме node:fs/node:path из коробки.
+ * Это НЕ сборка (bundle) — обычный JSON без зависимостей (только node:fs/path).
+ * Формат именно JSON (не ES-модуль): background service worker читает конфиг
+ * через fetch(chrome.runtime.getURL(...)) — динамический import() в SW
+ * запрещён спецификацией HTML (см. AGENTS.md §8.4).
  */
 'use strict';
 
@@ -17,7 +19,7 @@ const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
 const ENV_PATH = path.join(ROOT, '.env');
-const OUT_PATH = path.join(ROOT, 'extension', 'background', 'config.js');
+const OUT_PATH = path.join(ROOT, 'extension', 'background', 'config.json');
 
 /** Разбор простого KEY=VALUE .env (комментии и пустые строки пропускаются). */
 function parseEnv(text) {
@@ -78,21 +80,9 @@ function main() {
   };
 
   // Готовность к синхронизации: для Realtime Database нужен databaseURL.
+  // Формат — чистый JSON (без комментариев): его читает res.json() в SW.
   const filled = !!config.databaseURL;
-  const banner =
-    '/**\n' +
-    ' * СГЕНЕРИРОВАНО scripts/apply-config.js из .env — НЕ РЕДАКТИРУЙТЕ ВРУЧНУЮ.\n' +
-    ' * Этот файл в .gitignore и не попадает в репозиторий.\n' +
-    ' * Заполните .env и выполните `npm run config`, чтобы обновить.\n' +
-    ' */\n';
-  const body =
-    banner +
-    'export const firebaseConfig = ' +
-    JSON.stringify(config, null, 2) +
-    ';\n\n' +
-    'export const firebaseConfigReady = ' +
-    (filled ? 'true' : 'false') +
-    ';\n';
+  const body = JSON.stringify(config, null, 2) + '\n';
 
   fs.mkdirSync(path.dirname(OUT_PATH), { recursive: true });
   fs.writeFileSync(OUT_PATH, body, 'utf8');

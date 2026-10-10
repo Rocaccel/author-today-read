@@ -83,7 +83,7 @@ Chrome-расширение (Manifest V3): кнопки **[+]** и **[−]** с 
    npm run config
    ```
 
-   Это создаст `extension/background/config.js` (тоже в `.gitignore`).
+   Это создаст `extension/background/config.json` (тоже в `.gitignore`).
 5. Перезагрузите расширение в `chrome://extensions`.
 
 Без конфига расширение работает локально — синхронизация просто выключена.
@@ -115,7 +115,7 @@ Chrome-расширение (Manifest V3): кнопки **[+]** и **[−]** с 
 AGENTS.md              полная спецификация проекта (для разработчиков и агентов)
 .env                   конфиг Firebase (GITIGNORE, заполняет пользователь)
 package.json           тесты + npm run config
-scripts/apply-config.js  .env → extension/background/config.js
+scripts/apply-config.js  .env → extension/background/config.json
 tests/                 автотесты jsdom
 extension/             ← грузится в Chrome как распакованное расширение
   manifest.json           MV3 (permissions: storage; options_ui; host: rtdb)
@@ -129,7 +129,7 @@ extension/             ← грузится в Chrome как распакова�
   options/                страница настроек (фраза, статус, синхронизация)
   background/service-worker.js  роутер сообщений + хранилище фразы
   background/firebase.js  Realtime Database REST-клиент (GET/PATCH/sync)
-  background/config.js    ГЕНЕРИРУЕТСЯ из .env (GITIGNORE)
+  background/config.json    ГЕНЕРИРУЕТСЯ из .env (GITIGNORE)
 ```
 
 Сборка не требуется: чистый JavaScript, файлы подключаются как есть.

@@ -15,9 +15,11 @@
  *   }
  * Правила БД открытые — контент зашифрован ключом от кодовой фразы.
  *
- * Конфиг подтягивается динамическим import() из config.js (генерируется из
- * .env командой `npm run config`, файл в .gitignore). Если файла нет или
- * databaseURL пустой — isReady() === false, синхронизация выключена, ошибок нет.
+ * Конфиг подтягивается через fetch(chrome.runtime.getURL('background/config.json'))
+ * (файл генерируется из .env командой `npm run config`, в .gitignore). Если файла
+ * нет или databaseURL пустой — isReady() === false, синхронизация выключена,
+ * ошибок нет. ВАЖНО: динамический import() в ServiceWorkerGlobalScope запрещён
+ * спецификацией HTML (w3c/ServiceWorker#1356) — используем только fetch.
  * Ключ API для RTDB REST не нужен — доступ определяют только правила БД.
  */
 
@@ -33,14 +35,14 @@ async function getKeyForPhrase(phrase) {
   return key;
 }
 
-/** Загрузка конфига из config.js (может отсутствовать — это норма). */
+/** Кэш конфига: файл читаем один раз за жизнь SW. */
 let configPromise = null;
 export function loadConfig() {
   if (!configPromise) {
-    configPromise = import('./config.js').then(
-      (m) => ({ config: m.firebaseConfig || {}, ready: !!m.firebaseConfigReady }),
-      () => ({ config: {}, ready: false })
-    );
+    configPromise = fetch(chrome.runtime.getURL('background/config.json'))
+      .then((res) => (res.ok ? res.json() : {}))
+      .then((config) => ({ config: config || {}, ready: !!(config && config.databaseURL) }))
+      .catch(() => ({ config: {}, ready: false })); // файла нет (свежий клон) — это норма
   }
   return configPromise;
 }
