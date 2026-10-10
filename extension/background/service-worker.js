@@ -105,7 +105,7 @@ async function handleSync(msg) {
     // Ошибка сети/правил — сохраняем для options, content остаётся тихим.
     let message = String(err && err.message ? err.message : err);
     if (err && (err.status === 401 || err.status === 403)) {
-      message += ' — проверьте правила Realtime Database (должны быть открыты, см. README)';
+      message += ' — проверьте правила Realtime Database (должны быть открыты, см. DEVELOPMENT.md)';
     }
     await setLastError(message);
     return { ok: false, error: message };

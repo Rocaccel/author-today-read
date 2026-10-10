@@ -4,7 +4,7 @@
 нейросеть/агент должна суметь **полностью воссоздать расширение с нуля**, только
 прочитав этот файл (исходный `promt.md` удалён, все правки требований внесены сюда).
 
-Папка проекта: `C:\Users\ser\Desktop\GitHub\author-today-readed`
+Папка проекта: `C:\Users\ser\Desktop\GitHub\author-today-read`
 Рабочая папка расширения: `extension/` (именно её грузят в Chrome как unpacked).
 
 ---
@@ -227,9 +227,11 @@ URL: `https://author.today/work/233831` — одиночная карточка 
 ## 4. Архитектура и состав файлов
 
 ```
-author-today-readed/
+author-today-read/
 ├── AGENTS.md                    ← этот файл (спецификация)
-├── README.md                    ← инструкция по установке и настройке Firebase
+├── README.md                    ← пользовательская инструкция (установка, использование, вход по фразе)
+├── DEVELOPMENT.md               ← для разработчиков: структура, тесты, настройка синхронизации из исходников
+├── LICENSE                      ← 0BSD (текст лицензии)
 ├── .env                         ← конфиг Firebase (GITIGNORE, заполняет пользователь)
 ├── package.json                 ← тесты + `npm run config` (jsdom devDependency)
 ├── scripts/
@@ -531,7 +533,7 @@ users/{userId}/marks/{workId} → {
 - `userId = hex(SHA-256(нормализованной фразы))` — детерминирован, одинаков
   на всех устройствах с одной фразой.
 - Правила Realtime Database (пользователь настраивает в консоли:
-  Realtime Database → вкладка Rules; сниппет в README):
+  Realtime Database → вкладка Rules; сниппет в DEVELOPMENT.md):
 
 ```json
 {
@@ -615,11 +617,18 @@ users/{userId}/marks/{workId} → {
    `background/config.json` **только с полем `databaseURL`** (остальные
    поля .env в ассет не класть — они не используются кодом). Каталог
    `dist/` в .gitignore.
-3. `config.json` в git НЕ попадает (§7); в релизном ассете — допустимо:
-   `databaseURL` не секрет (доступ определяют правила БД + шифрование
-   фразой, `userId` = SHA-256 не угадать). Без этого поля установка из
-   релиза даёт «синхронизация не настроена» — архив обязан работать
-   «из коробки».
-4. Создание: `gh release create vX.Y.Z dist/author-today-readed-X.Y.Z.zip
-   --title "vX.Y.Z — …" --notes "…"`. Перезаливка: `gh release upload
-   vX.Y.Z <zip> --clobber`.
+3. CRX: из временной копии `extension/` (с тем же урезанным `config.json`)
+   упаковать подписанный crx:
+   `<chrome|chromium>.exe --pack-extension=<temp\author-today-read>
+   --pack-extension-key=extension.pem` → `dist/author-today-read-X.Y.Z.crx`.
+   Файл `.pem` — в `.gitignore` (`*.pem`), НИКОГДА не коммитить; один ключ
+   = стабильный ID расширения на всех машинах.
+4. `config.json` в git НЕ попадает (§7); в релизных ассетах (zip/crx) —
+   обязательно: `databaseURL` не секрет (доступ определяют правила БД +
+   шифрование фразой, `userId` = SHA-256 не угадать). Без этого поля
+   установка из релиза даёт «синхронизация не настроена» — ассеты обязаны
+   работать «из коробки».
+5. Создание: `gh release create vX.Y.Z dist/author-today-read-X.Y.Z.zip
+   dist/author-today-read-X.Y.Z.crx --title "vX.Y.Z — …" --notes "…"`.
+   Перезаливка: `gh release upload vX.Y.Z <файлы> --clobber`.
+6. Лицензия проекта — 0BSD (файл `LICENSE`, ссылка в конце README).
