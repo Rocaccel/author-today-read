@@ -305,7 +305,7 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 {
   "manifest_version": 3,
   "name": "Author.Today — отметки книг",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Отметки ✅/❌ рядом с названиями книг в списках и таблицах поиска и каталога, а также в заголовке страницы книги.",
   "content_scripts": [
     {
