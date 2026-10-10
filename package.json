@@ -1,0 +1,12 @@
+{
+  "name": "autor-today-readed",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Тесты расширения «Author.Today — отметки книг». Само расширение от npm не зависит — см. AGENTS.md.",
+  "scripts": {
+    "test": "node tests/smoke.test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0"
+  }
+}

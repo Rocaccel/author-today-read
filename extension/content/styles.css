@@ -1,0 +1,111 @@
+/**
+ * Стили панели отметок [+] [индикатор] [−].
+ *
+ * Панель вставляется внутрь заголовка книги (см. content/dom.js), поэтому:
+ *  - inline-flex + вертикальное центрирование, чтобы жить в потоке текста
+ *    и не ломать существующий float-right блок .work-list-actions;
+ *  - фиксированный min-width у индикатора, чтобы строки не «прыгали»
+ *    при смене пусто/✅/❌.
+ *
+ * Тема: сайт переключает класс `dark` на <html>; дублируем ветку .dark.
+ */
+
+.atr-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 6px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+/* Кнопка ±: компактная, рамка вместо заливки в неактивном состоянии. */
+.atr-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  margin: 0;
+  border: 1px solid #cfd8dc;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #90a4ae;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+}
+
+.atr-btn:hover {
+  border-color: #90a4ae;
+  color: #546e7a;
+}
+
+.atr-btn:focus-visible {
+  outline: 2px solid #4582af; /* фирменный синий сайта */
+  outline-offset: 1px;
+}
+
+/* Активное состояние: + зеленеет, − краснеет (класс ставит content/ui.js). */
+.atr-btn.atr-plus.atr-active {
+  border-color: #2e7d32;
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.atr-btn.atr-minus.atr-active {
+  border-color: #c62828;
+  background: #ffebee;
+  color: #c62828;
+}
+
+/* Индикатор статуса: пусто / ✅ / ❌. Фиксированная ширина — стабильная вёрстка. */
+.atr-status {
+  display: inline-block;
+  min-width: 18px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1;
+  user-select: none;
+}
+
+/* Страница книги: панель лежит внутри <h1 class="book-title">, у которого
+ * большой кегль и свой margin — гасим наследование, чтобы кнопки остались
+ * 20×20 и стояли ровно после текста названия. */
+.book-meta-panel > h1.book-title .atr-controls {
+  margin-left: 10px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.book-meta-panel > h1.book-title .atr-btn,
+.book-meta-panel > h1.book-title .atr-status {
+  font-size: 13px;
+  vertical-align: middle;
+}
+
+/* Тёмная тема сайта (класс на <html>). */
+html.dark .atr-btn {
+  border-color: #455a64;
+  background: #2f3b47;
+  color: #78909c;
+}
+
+html.dark .atr-btn:hover {
+  border-color: #78909c;
+  color: #b0bec5;
+}
+
+html.dark .atr-btn.atr-plus.atr-active {
+  border-color: #66bb6a;
+  background: #1b3d22;
+  color: #66bb6a;
+}
+
+html.dark .atr-btn.atr-minus.atr-active {
+  border-color: #ef5350;
+  background: #462022;
+  color: #ef5350;
+}

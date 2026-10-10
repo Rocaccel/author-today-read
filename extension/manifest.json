@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Author.Today — отметки книг",
+  "version": "1.0.0",
+  "description": "Отметки ✅/❌ рядом с названиями книг в списках и таблицах поиска и каталога author.today, а также в заголовке страницы книги.",
+  "content_scripts": [
+    {
+      "matches": ["https://author.today/*"],
+      "js": ["content/storage.js", "content/ui.js", "content/dom.js", "content/main.js"],
+      "css": ["content/styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  }
+}
