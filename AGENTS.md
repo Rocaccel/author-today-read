@@ -2,7 +2,7 @@
 
 Этот файл — **единственный источник истины** по проекту. Цель документа: любой
 нейросеть/агент должна суметь **полностью воссоздать расширение с нуля**, только
-прочитав этот файл (исходный `promt.md` удалён, все правки требований внесены сюда).
+прочитав этот файл.
 
 Папка проекта: `C:\Users\ser\Desktop\GitHub\author-today-read`
 Рабочая папка расширения: `extension/` (именно её грузят в Chrome как unpacked).
@@ -42,11 +42,11 @@ Chrome-расширение (Manifest V3) для сайта <https://author.toda
 
 ### 1.1. Семантика кнопок (переключатели с заменой)
 
-| Текущее состояние | клик `+` | клик `−` |
-|---|---|---|
-| пусто (`null`) | `✅` (`"read"`) | `❌` (`"skip"`) |
-| `✅` (`"read"`) | пусто (запись удаляется) | `❌` (`"skip"`) |
-| `❌` (`"skip"`) | `✅` (`"read"`) | пусто (запись удаляется) |
+| Текущее состояние | клик `+`                 | клик `−`                 |
+| ----------------- | ------------------------ | ------------------------ |
+| пусто (`null`)    | `✅` (`"read"`)           | `❌` (`"skip"`)           |
+| `✅` (`"read"`)    | пусто (запись удаляется) | `❌` (`"skip"`)           |
+| `❌` (`"skip"`)    | `✅` (`"read"`)           | пусто (запись удаляется) |
 
 Каждая кнопка **переключает свою** отметку и при этом **заменяет чужую**.
 Повторное нажатие на кнопку в своём состоянии снимает отметку (запись из хранилища
@@ -294,66 +294,66 @@ author-today-read/
 
 **`content/storage.js` → `ATR.storage`** (схема v2, §3.1)
 
-| функция | сигнатура | что делает |
-|---|---|---|
-| `getAll()` | `() → Object` | весь объект `{wid: {m, t}}` (после миграции v1; повреждённый JSON → `{}`) |
-| `get(workId)` | `(string) → "read"\|"skip"\|null` | текущая отметка (томбстоун/нет записи → null) |
-| `getStamp(workId)` | `(string) → number` | epoch_ms последнего изменения, 0 если нет записи |
-| `set(workId, mark)` | `(string, "read"\|"skip") → void` | запись `{m, t: Date.now()}` |
-| `remove(workId)` | `(string) → void` | **томбстоун** `{m: null, t}` (не `delete`); уже томбстоун → no-op |
-| `toggle(workId, mark)` | `(string, "read"\|"skip") → "read"\|"skip"\|null` | семантика §1.1; после изменения шлёт `document` событие `'atr:changed'` с `{detail:{workId}}` |
-| `mergeRemote(remote)` | `(Object) → string[]` | LWW-слияние облачных данных: принимает запись, если её `t` **больше** локального; возвращает список изменившихся workId |
+| функция                | сигнатура                                         | что делает                                                                                                              |
+| ---------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `getAll()`             | `() → Object`                                     | весь объект `{wid: {m, t}}` (после миграции v1; повреждённый JSON → `{}`)                                               |
+| `get(workId)`          | `(string) → "read"\|"skip"\|null`                 | текущая отметка (томбстоун/нет записи → null)                                                                           |
+| `getStamp(workId)`     | `(string) → number`                               | epoch_ms последнего изменения, 0 если нет записи                                                                        |
+| `set(workId, mark)`    | `(string, "read"\|"skip") → void`                 | запись `{m, t: Date.now()}`                                                                                             |
+| `remove(workId)`       | `(string) → void`                                 | **томбстоун** `{m: null, t}` (не `delete`); уже томбстоун → no-op                                                       |
+| `toggle(workId, mark)` | `(string, "read"\|"skip") → "read"\|"skip"\|null` | семантика §1.1; после изменения шлёт `document` событие `'atr:changed'` с `{detail:{workId}}`                           |
+| `mergeRemote(remote)`  | `(Object) → string[]`                             | LWW-слияние облачных данных: принимает запись, если её `t` **больше** локального; возвращает список изменившихся workId |
 
 Константы: `ATR.storage.KEY_V2 = 'atr.v2.marks'`, `KEY_V1 = 'atr.v1.marks'`,
 `MARK_READ = 'read'`, `MARK_SKIP = 'skip'`.
 
 **`content/sync.js` → `ATR.sync`**
 
-| функция | что делает |
-|---|---|
-| `isSupported()` | есть ли `chrome.runtime.sendMessage` (в тестах может отсутствовать) |
-| `init()` | подписка на `'atr:changed'` (debounce push 1.5 с), `focus` окна (pull не чаще 30 с) + первый `syncNow()` при загрузке страницы |
-| `syncNow()` | один round-trip: шлёт `{type:'atr:sync:sync', entries: getAll()}` → принимает `res.pull` → `storage.mergeRemote()` → `ui.renderAll(wid)` (БЕЗ события `atr:changed`, чтобы не зациклить push). Одновременно только один запрос (inFlight + pending). Ошибки/`skip` — молча, локальная работа продолжается |
+| функция         | что делает                                                                                                                                                                                                                                                                                                |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `isSupported()` | есть ли `chrome.runtime.sendMessage` (в тестах может отсутствовать)                                                                                                                                                                                                                                       |
+| `init()`        | подписка на `'atr:changed'` (debounce push 1.5 с), `focus` окна (pull не чаще 30 с) + первый `syncNow()` при загрузке страницы                                                                                                                                                                            |
+| `syncNow()`     | один round-trip: шлёт `{type:'atr:sync:sync', entries: getAll()}` → принимает `res.pull` → `storage.mergeRemote()` → `ui.renderAll(wid)` (БЕЗ события `atr:changed`, чтобы не зациклить push). Одновременно только один запрос (inFlight + pending). Ошибки/`skip` — молча, локальная работа продолжается |
 
 **`shared/phrase.js` (ES-модуль, options + background)**
 
-| экспорт | что делает |
-|---|---|
-| `WORDLIST`, `PHRASE_WORDS=15`, `MIN_WORDS=12`, `MAX_WORDS=30` | встроенный список из 128 слов и лимиты |
-| `generatePhrase(n?)` | 15 случайных слов через `crypto.getRandomValues` |
-| `normalizePhrase(s)` | lowercase + trim + схлопывание пробелов |
-| `validatePhrase(s)` | null если ок, иначе текст ошибки (12–30 слов) |
-| `deriveUserId(phrase)` | `hex(SHA-256(normalize(phrase)))` — userId, путь в БД |
-| `deriveKey(phrase)` | PBKDF2-SHA256(соль `"atr.sync.v1"`, 100k) → AES-GCM-256 CryptoKey |
-| `encryptMark(key, mark)` | `{v, iv, ct}` (base64); iv — 12 случайных байт |
-| `decryptMark(key, payload)` | обратно `"read"\|"skip"\|null`; неверный ключ → исключение |
+| экспорт                                                       | что делает                                                        |
+| ------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `WORDLIST`, `PHRASE_WORDS=15`, `MIN_WORDS=12`, `MAX_WORDS=30` | встроенный список из 128 слов и лимиты                            |
+| `generatePhrase(n?)`                                          | 15 случайных слов через `crypto.getRandomValues`                  |
+| `normalizePhrase(s)`                                          | lowercase + trim + схлопывание пробелов                           |
+| `validatePhrase(s)`                                           | null если ок, иначе текст ошибки (12–30 слов)                     |
+| `deriveUserId(phrase)`                                        | `hex(SHA-256(normalize(phrase)))` — userId, путь в БД             |
+| `deriveKey(phrase)`                                           | PBKDF2-SHA256(соль `"atr.sync.v1"`, 100k) → AES-GCM-256 CryptoKey |
+| `encryptMark(key, mark)`                                      | `{v, iv, ct}` (base64); iv — 12 случайных байт                    |
+| `decryptMark(key, payload)`                                   | обратно `"read"\|"skip"\|null`; неверный ключ → исключение        |
 
 **`background/firebase.js` (ES-модуль, реальный REST-клиент)**
 
-| функция | что делает |
-|---|---|
-| `loadConfig()` | кэшированный `fetch(chrome.runtime.getURL('background/config.json'))` (`.ok ? json : {}`, catch → пустой конфиг) → `{config, ready}` (ready = `!!databaseURL`; файла может не быть) |
+| функция                         | что делает                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `loadConfig()`                  | кэшированный `fetch(chrome.runtime.getURL('background/config.json'))` (`.ok ? json : {}`, catch → пустой конфиг) → `{config, ready}` (ready = `!!databaseURL`; файла может не быть)                                                                                                                                                                             |
 | `initFirebase(config)` → клиент | `isReady()` (databaseURL), `pullDocs(userId)` (GET `{db}/users/{uid}/marks.json`; пустое дерево → `null` → `[]`), `sync(userId, phrase, localEntries)` → `{pull, pushed, skipped}`: расшифровывает облако, пушит локальное новее облака одним `PATCH` (RTDB мержит ветки), возвращает облачное новее локального. Ошибки HTTP — исключение со свойством `status` |
 
 **`background/service-worker.js` (роутер `chrome.runtime.onMessage`)**
 
-| сообщение | вход → выход |
-|---|---|
-| `atr:status` | `→ {ok, configReady, hasPhrase, phrase, userId, lastSync, lastError, ready}` (`phrase` — для кнопок Показать/Копировать в options, §8.5) |
-| `atr:phrase:set` | `{phrase}` → валидация, `deriveUserId`, сохранение в `chrome.storage.local` → `{ok, userId}` / `{ok:false, error}` |
-| `atr:phrase:clear` | `→ {ok}` (удаляет фразу/userId/ошибку) |
-| `atr:sync:sync` | `{entries}` → полный round-trip с Realtime Database → `{ok, pull, pushed, skipped}` либо `{ok:false, skip:true, reason:'config'\|'phrase'}` (не ошибка!) либо `{ok:false, error}` (сеть/правила, текст сохраняется в `atr.sync.lastError`) |
+| сообщение          | вход → выход                                                                                                                                                                                                                               |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `atr:status`       | `→ {ok, configReady, hasPhrase, phrase, userId, lastSync, lastError, ready}` (`phrase` — для кнопок Показать/Копировать в options, §8.5)                                                                                                   |
+| `atr:phrase:set`   | `{phrase}` → валидация, `deriveUserId`, сохранение в `chrome.storage.local` → `{ok, userId}` / `{ok:false, error}`                                                                                                                         |
+| `atr:phrase:clear` | `→ {ok}` (удаляет фразу/userId/ошибку)                                                                                                                                                                                                     |
+| `atr:sync:sync`    | `{entries}` → полный round-trip с Realtime Database → `{ok, pull, pushed, skipped}` либо `{ok:false, skip:true, reason:'config'\|'phrase'}` (не ошибка!) либо `{ok:false, error}` (сеть/правила, текст сохраняется в `atr.sync.lastError`) |
 
 `options/options.js` — чистый UI: `generatePhrase/validatePhrase/normalizePhrase`
 из shared + те же 4 сообщения; локальных данных не хранит.
 
 **`content/ui.js` → `ATR.ui`**
 
-| функция | сигнатура | что делает |
-|---|---|---|
-| `create(workId)` | `(string) → HTMLElement` | возвращает `<span class="atr-controls" data-atr-wid="ID">` с кнопками `[+] [span.atr-status] [−]` и навешенными обработчиками |
-| `render(root)` | `(HTMLElement) → void` | читает отметку и обновляет текст индикатора/классы кнопок у конкретной панели |
-| `renderAll(workId)` | `(string) → void` | обновляет все панели этого workId (на странице может быть одна, но перестраховка) |
+| функция             | сигнатура                | что делает                                                                                                                    |
+| ------------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `create(workId)`    | `(string) → HTMLElement` | возвращает `<span class="atr-controls" data-atr-wid="ID">` с кнопками `[+] [span.atr-status] [−]` и навешенными обработчиками |
+| `render(root)`      | `(HTMLElement) → void`   | читает отметку и обновляет текст индикатора/классы кнопок у конкретной панели                                                 |
+| `renderAll(workId)` | `(string) → void`        | обновляет все панели этого workId (на странице может быть одна, но перестраховка)                                             |
 
 Поведение кнопок: `click → event.preventDefault(); event.stopPropagation(); →
 ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обязателен —
@@ -361,16 +361,16 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 
 **`content/dom.js` → `ATR.dom`**
 
-| функция | что делает |
-|---|---|
-| `isEnabledPage()` | `true`, если `location.pathname` начинается с `/search` или `/work` |
-| `isBookPage()` | `true`, если `location.pathname` матчится с `/^\/work\/(\d+)$/` (одиночная страница книги, §2.5) |
-| `findWorkLink(target)` | ищет внутри `target` ссылку на книгу (`/work/(\d+)`, умеет абсолютные URL); возвращает `{ link, workId }` или null |
-| `findTargets()` | `NodeList` точек вставки: `.book-row .book-title` (только элементы-строки!) и `table.books-table tbody td:first-child` |
-| `inject(target)` | идемпотентно: если внутри уже есть `[data-atr-wid]` — выйти; иначе создать панель (`ATR.ui.create`) и вставить **сразу после ссылки на книгу**; после вставить `ATR.ui.render` |
-| `injectBookPage()` | страница книги (§2.5): `workId` из `location.pathname`; идемпотентно (проверка `[data-atr-wid]` **внутри h1**) иначе `ATR.ui.create` → `h1.append(panel)` → `ATR.ui.render`; если `h1` не найден — выйти |
-| `scan()` | полный проход: `findTargets()` + `inject()` **плюс** `injectBookPage()`; главный вход |
-| `start()` | первичный `scan()` + `MutationObserver` на `document.body` (childList, subtree) с debounce ~150 мс + слушатели `'pjax:end'`, `'pjax:success'` (document), `'atr:changed'` (document), `storage` (window) |
+| функция                | что делает                                                                                                                                                                                               |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `isEnabledPage()`      | `true`, если `location.pathname` начинается с `/search` или `/work`                                                                                                                                      |
+| `isBookPage()`         | `true`, если `location.pathname` матчится с `/^\/work\/(\d+)$/` (одиночная страница книги, §2.5)                                                                                                         |
+| `findWorkLink(target)` | ищет внутри `target` ссылку на книгу (`/work/(\d+)`, умеет абсолютные URL); возвращает `{ link, workId }` или null                                                                                       |
+| `findTargets()`        | `NodeList` точек вставки: `.book-row .book-title` (только элементы-строки!) и `table.books-table tbody td:first-child`                                                                                   |
+| `inject(target)`       | идемпотентно: если внутри уже есть `[data-atr-wid]` — выйти; иначе создать панель (`ATR.ui.create`) и вставить **сразу после ссылки на книгу**; после вставить `ATR.ui.render`                           |
+| `injectBookPage()`     | страница книги (§2.5): `workId` из `location.pathname`; идемпотентно (проверка `[data-atr-wid]` **внутри h1**) иначе `ATR.ui.create` → `h1.append(panel)` → `ATR.ui.render`; если `h1` не найден — выйти |
+| `scan()`               | полный проход: `findTargets()` + `inject()` **плюс** `injectBookPage()`; главный вход                                                                                                                    |
+| `start()`              | первичный `scan()` + `MutationObserver` на `document.body` (childList, subtree) с debounce ~150 мс + слушатели `'pjax:end'`, `'pjax:success'` (document), `'atr:changed'` (document), `storage` (window) |
 
 Идемпотентность — ключевое: повторные `scan()` **не должны дублировать** панели
 (проверка `target.querySelector('[data-atr-wid]')`).
