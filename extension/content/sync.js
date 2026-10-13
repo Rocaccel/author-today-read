@@ -25,6 +25,11 @@
   const FOCUS_DEBOUNCE_MS = 2000; // окно получило фокус — сверяемся с облаком
   const FOCUS_MIN_INTERVAL_MS = 30000; // но не чаще раза в 30 секунд
 
+  // Импорт из файла (v0.2.4): options пишет санитизованный срез сюда
+  // (options НЕ имеет доступа к localStorage страницы), content применяет.
+  const PENDING_IMPORT_KEY = 'atr.sync.pendingImport';
+  let importInFlight = false;
+
   // Backoff для ретраев при ошибке сети/правил (v0.2.1):
   // 5 с → 15 с → 1 мин → 5 мин → 15 мин (потолок, дальше каждые 15 мин).
   // Цепочка живёт, пока открыта вкладка; данные всегда лежат в localStorage,
@@ -128,6 +133,35 @@
     syncNow();
   }
 
+  /**
+   * Применить отложенный импорт из файла (v0.2.4): слияние LWW по t
+   * (mergeRemote) — отметки новее файла не затираются; томбстоуны файла
+   * тоже участвуют. Успешно применённый срез удаляется из chrome.storage
+   * (повторные вкладки/idempotent), изменившиеся панели перерисовываются
+   * (другие вкладки подхватывают через событие window 'storage'), уходит
+   * push. Вызывается из init() и по chrome.storage.onChanged.
+   */
+  async function applyPendingImport() {
+    if (importInFlight) return;
+    if (!isSupported() || !chrome.storage || !chrome.storage.local) return;
+    importInFlight = true;
+    try {
+      const data = await chrome.storage.local.get(PENDING_IMPORT_KEY);
+      const entries = data && data[PENDING_IMPORT_KEY];
+      if (!entries || typeof entries !== 'object') return;
+      const changed = ATR.storage.mergeRemote(entries);
+      if (changed.length && ATR.ui) {
+        for (const wid of changed) ATR.ui.renderAll(wid);
+      }
+      await chrome.storage.local.remove(PENDING_IMPORT_KEY);
+      if (changed.length) syncNow();
+    } catch (err) {
+      console.debug('[ATR] импорт не применён:', err && err.message);
+    } finally {
+      importInFlight = false;
+    }
+  }
+
   /** Debounced push: серия кликов по кнопкам → одна синхронизация. */
   function schedulePush() {
     if (pushTimer) clearTimeout(pushTimer);
@@ -151,10 +185,13 @@
 
   /**
    * Инициализация (вызывается из main.js после загрузки всех модулей):
-   *  1) первый pull при открытии страницы;
+   *  1) первый pull при открытии страницы (после применения отложенного
+   *     импорта, v0.2.4 — чтобы свежий push ушёл одним round-trip);
    *  2) push после каждого локального изменения (событие из storage.js);
    *  3) периодическая сверка при возврате фокуса на вкладку;
-   *  4) немедленный повтор после восстановления сети (v0.2.1, событие online).
+   *  4) немедленный повтор после восстановления сети (v0.2.1, событие online);
+   *  5) отложенный импорт из Параметров (v0.2.4): проверка при загрузке +
+   *     слушатель chrome.storage.onChanged для уже открытых вкладок.
    */
   function init() {
     if (!isSupported()) return;
@@ -163,10 +200,18 @@
     window.addEventListener('focus', onWindowFocus);
     window.addEventListener('online', onOnline);
 
-    syncNow();
+    if (chrome.storage && chrome.storage.onChanged) {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== 'local') return;
+        const c = changes[PENDING_IMPORT_KEY];
+        if (c && c.newValue) applyPendingImport();
+      });
+    }
+
+    applyPendingImport().finally(() => syncNow());
   }
 
-  ATR.sync = { isSupported, init, syncNow, scheduleRetry, resetRetry };
+  ATR.sync = { isSupported, init, syncNow, scheduleRetry, resetRetry, applyPendingImport };
   // Тестовый хук: укорачивает интервалы backoff, чтобы тесты не ждали секунды.
   ATR.sync.__setRetryDelays = (arr) => {
     retryDelays = Array.isArray(arr) && arr.length ? arr.slice() : [5000];

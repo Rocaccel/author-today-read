@@ -24,6 +24,7 @@ const K_USER = 'atr.sync.userId';
 const K_LAST_SYNC = 'atr.sync.lastSync';
 const K_LAST_ERROR = 'atr.sync.lastError';
 const K_STATS = 'atr.sync.stats'; // {read, skip, total, at} — кэш счётчиков (v0.2.2)
+const K_SNAPSHOT = 'atr.sync.snapshot'; // {entries, at} — последний срез от content (v0.2.4, экспорт)
 
 /**
  * Счётчики из локального среза {wid: {m, t}} (v0.2.2).
@@ -41,14 +42,18 @@ export function computeStats(entries) {
 }
 
 /**
- * Кэшировать счётчики. Вызывается из handleSync ТОЛЬКО для сообщений от
- * content-вкладок (sender.tab): options шлёт atr:sync:sync с entries:{} —
- * без этой проверки он обнулял бы статистику. Кэш обновляется ДО проверок
- * конфига/фразы — счётчики локальные и работают без синхронизации.
+ * Кэшировать счётчики и полный снапшот среза. Вызывается из handleSync
+ * ТОЛЬКО для сообщений от content-вкладок (sender.tab): options шлёт
+ * atr:sync:sync с entries:{} — без этой проверки он обнулял бы статистику
+ * и экспорт (v0.2.4). Кэш обновляется ДО проверок конфига/фразы — счётчики
+ * локальные и работают без синхронизации.
  */
 async function saveStatsFrom(entries, sender) {
   if (!sender || !sender.tab || !entries || typeof entries !== 'object') return;
-  await chrome.storage.local.set({ [K_STATS]: computeStats(entries) });
+  await chrome.storage.local.set({
+    [K_STATS]: computeStats(entries),
+    [K_SNAPSHOT]: { entries, at: new Date().toISOString() }
+  });
 }
 
 /** Сохранённая фраза (нормализованная) или null. */

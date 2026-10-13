@@ -138,6 +138,18 @@ button:disabled {
   margin: 8px 0 0;
 }
 
+/* Яркое предупреждение (важность фразы) — красное на розовом фоне */
+.alert-warning {
+  color: #b71c1c;
+  background: #ffebee;
+  border: 1px solid #ef9a9a;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 8px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .phrase-box {
   margin-top: 4px;
   padding: 8px;

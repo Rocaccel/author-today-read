@@ -219,7 +219,11 @@ URL: `https://author.today/work/233831` — одиночная карточка 
 - Ключи: `atr.sync.phrase` (нормализованная фраза), `atr.sync.userId`,
   `atr.sync.lastSync`, `atr.sync.lastError`,
   **`atr.sync.stats`** (`{read, skip, total, at}` — кэш счётчиков, v0.2.2;
-  обновляется из content-вкладок при каждом `atr:sync:sync`, см. §4.2/§8.5).
+  обновляется из content-вкладок при каждом `atr:sync:sync`, см. §4.2/§8.5),
+  **`atr.sync.snapshot`** (`{entries, at}` — последний срез от content,
+  v0.2.4; данные для «Экспорт JSON», пишется там же в `handleSync`),
+  **`atr.sync.pendingImport`** (санитизованные entries из файла, v0.2.4;
+  пишет options, применяет и удаляет content, см. §8.5).
 - Фраза хранится ТОЛЬКО здесь (читает только расширение); в page localStorage
   не попадает — сайт author.today её не видит.
 - Требует `"permissions": ["storage"]` в manifest.
@@ -256,7 +260,8 @@ author-today-read/
     │   ├── main.js              ← точка входа (sync.init + dom.start)
     │   └── styles.css           ← стили панели (light + dark)
     ├── shared/
-    │   └── phrase.js            ← ES-модуль: кодовая фраза, userId, PBKDF2/AES-GCM (options + background)
+    │   ├── phrase.js            ← ES-модуль: кодовая фраза, userId, PBKDF2/AES-GCM (options + background)
+    │   └── backup.js            ← ES-модуль: экспорт/импорт отметок в JSON (v0.2.4, только options)
     ├── options/
     │   ├── options.html         ← страница настроек (chrome://extensions → Настройки)
     │   ├── options.js           ← генерация/ввод фразы, статус, ручная синхронизация, выход
@@ -319,10 +324,11 @@ author-today-read/
 **`content/sync.js` → `ATR.sync`**
 
 | функция         | что делает                                                                                                                                                                                                                                                                                                |
-| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `isSupported()` | есть ли `chrome.runtime.sendMessage` (в тестах может отсутствовать)                                                                                                                                                                                                                                       |
-| `init()`        | подписка на `'atr:changed'` (debounce push 1.5 с), `focus` окна (pull не чаще 30 с), **`online` окна (немедленный повтор после восстановления сети, v0.2.1)** + первый `syncNow()` при загрузке страницы                                                                                                |
+| `init()`        | подписка на `'atr:changed'` (debounce push 1.5 с), `focus` окна (pull не чаще 30 с), **`online` окна (немедленный повтор после восстановления сети, v0.2.1)** + первый `syncNow()` при загрузке страницы (**после применения отложенного импорта**, v0.2.4) + слушатель `chrome.storage.onChanged` на `atr.sync.pendingImport` (v0.2.4) |
 | `syncNow()`     | один round-trip: шлёт `{type:'atr:sync:sync', entries: getAll()}` → принимает `res.pull` → `storage.mergeRemote()` → `ui.renderAll(wid)` (БЕЗ события `atr:changed`, чтобы не зациклить push) + `storage.applyGc(res.gc)` (v0.2.1). Одновременно только один запрос (inFlight + pending). Исходы: **ok** → сброс backoff; **skip** (нет конфига/фразы) → не ретраится; **fail** (сеть/SW) → `scheduleRetry()` |
+| `applyPendingImport()` | **Импорт из файла (v0.2.4):** читает `atr.sync.pendingImport` из `chrome.storage.local` → `storage.mergeRemote()` (LWW по `t`: более новые локальные не затираются, томбстоуны переносятся) → рендер изменившихся → удаление ключа → `syncNow()` (push). Идемпотентно (in-flight + удалённый ключ); работает и без `chrome.storage` в стабах (guard) |
 | `scheduleRetry()` / `resetRetry()` | **Ретраи (v0.2.1):** backoff `5с → 15с → 1м → 5м → 15м` (потолок, дальше каждые 15 м; таблица `retryDelays`, тестовый хук `__setRetryDelays`). Один ожидающий таймер (идемпотентно); успех обнуляет. Цепочка живёт, пока открыта вкладка — данные всегда в localStorage, смерть вкладки не теряет их |
 
 **`shared/phrase.js` (ES-модуль, options + background)**
@@ -353,7 +359,7 @@ author-today-read/
 | `atr:status`       | `→ {ok, configReady, hasPhrase, phrase, userId, lastSync, lastError, stats, ready}` (`phrase` — для кнопок Показать/Копировать в options, §8.5; **`stats`** — `{read, skip, total, at}`, дефолт нули, v0.2.2)                             |
 | `atr:phrase:set`   | `{phrase}` → валидация, `deriveUserId`, сохранение в `chrome.storage.local` → `{ok, userId}` / `{ok:false, error}`                                                                                                                         |
 | `atr:phrase:clear` | `→ {ok}` (удаляет фразу/userId/ошибку)                                                                                                                                                                                                     |
-| `atr:sync:sync`    | `{entries}` → **сначала кэш статистики** (v0.2.2: `computeStats(entries)` → `atr.sync.stats`, ТОЛЬКО если `sender.tab` — options со своим `entries:{}` счётчики не трогает; до проверок конфига/фразы) → полный round-trip с Realtime Database → `{ok, pull, pushed, skipped, gc}` либо `{ok:false, skip:true, reason:'config'\|'phrase'}` (не ошибка!) либо `{ok:false, error}` (сеть/правила, текст сохраняется в `atr.sync.lastError`; content ретраит с backoff, §4.2) |
+| `atr:sync:sync`    | `{entries}` → **сначала кэш статистики и снапшота** (v0.2.2/0.2.4: `computeStats(entries)` → `atr.sync.stats` + `entries` → `atr.sync.snapshot`, ТОЛЬКО если `sender.tab` — options со своим `entries:{}` ничего не трогает; до проверок конфига/фразы) → полный round-trip с Realtime Database → `{ok, pull, pushed, skipped, gc}` либо `{ok:false, skip:true, reason:'config'\|'phrase'}` (не ошибка!) либо `{ok:false, error}` (сеть/правила, текст сохраняется в `atr.sync.lastError`; content ретраит с backoff, §4.2) |
 
 `computeStats(entries)` — экспорт service-worker.js: `{read, skip, total, at}`;
 томбстоуны (`m:null`) и мусор не считаются, `total = read + skip`.
@@ -362,6 +368,14 @@ content-вкладку от options-страницы.
 
 `options/options.js` — чистый UI: `generatePhrase/validatePhrase/normalizePhrase`
 из shared + те же 4 сообщения; локальных данных не хранит.
+
+**`shared/backup.js` (ES-модуль, только options; v0.2.4, §8.5)**
+
+| экспорт              | что делает                                                                                                     |
+| -------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `BACKUP_FORMAT/BACKUP_VERSION` | `'atr.marks'` / `1` — метка и версия файла                                                               |
+| `serializeMarks(entries)` | срез `{wid:{m,t}}` → строка JSON файла `{format, version, exportedAt, count, entries}` (санитизованный, томбстоуны включены) |
+| `parseBackup(text)`  | файл → `{entries, count}` либо `{error}` (человекочитаемый текст); отбраковывает чужой формат, версию >1 и записи с невалидными `m`/`t`/`wid` |
 
 **`content/ui.js` → `ATR.ui`**
 
@@ -391,13 +405,13 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 Идемпотентность — ключевое: повторные `scan()` **не должны дублировать** панели
 (проверка `target.querySelector('[data-atr-wid]')`).
 
-### 4.3. Структура manifest.json (v0.2.3)
+### 4.3. Структура manifest.json (v0.2.4)
 
 ```json
 {
   "manifest_version": 3,
   "name": "Author.Today — отметки книг",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Отметки ✅/❌ рядом с названиями книг в списках, таблицах и на странице книги. Синхронизация между устройствами через Firebase по кодовой фразе.",
   "icons": {
     "16": "icons/icon-16.png",
@@ -515,6 +529,12 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
     `chrome://extensions` расширение показывает зелёную книжку с галочкой
     (видно и в тёмном тулбаре, 16 px читается); клик по иконке открывает
     Параметры; манифест без ошибок (icons/action валидны).
+22. **Бэкап (v0.2.4)**: Параметры → «Бэкап» → «Экспорт JSON» — скачивается
+    файл с `count` отметок (нужен хотя бы один визит author.today — там
+    снапшот); «Импорт JSON» с этим файлом → статус «Импортировано N» →
+    открыть сайт → отметки на месте (новее файла не затёрты), ушёл push;
+    битый/чужой файл → понятная ошибка, ничего не меняется. Автотесты —
+    секция [15].
 
 ---
 
@@ -680,6 +700,23 @@ users/{userId}/marks/{workId} → {
   даже без фразы и конфига: счётчики локальные. Данные — `atr:status` →
   поле `stats` (кэш `atr.sync.stats`, заполняет content при каждом sync,
   §3.3/§4.2). Рендер — `renderStats()` в `options.js` без условия на фразу.
+- **«Бэкап»** (v0.2.4): карточка с кнопками `Экспорт JSON` / `Импорт JSON`,
+  статусной строкой и (после импорта) `Открыть author.today`. Видна
+  **всегда**, без фразы/конфига.
+  - **Экспорт**: options читает `atr.sync.snapshot` из `chrome.storage.local`
+    (кэширует background в `handleSync`, только от content-вкладок) →
+    `serializeMarks()` → скачивание файла
+    `author-today-marks-YYYY-MM-DD.json`. Свежесть = последний sync
+    (~1.5 с после клика / при открытии страницы) — так и написано в статусе.
+  - **Импорт**: `<input type=file>` → `parseBackup()` (валидация) → запись
+    в `atr.sync.pendingImport` → options НЕ может писать в localStorage
+    страницы, поэтому применяет content: `applyPendingImport()` при
+    загрузке сайта и по `chrome.storage.onChanged` (§4.2) — слияние LWW
+    по `t` (более новые локальные не затираются), затем push. Кнопка
+    `Открыть author.today` (`chrome.tabs.create` — разрешения не требует)
+    нужна, когда вкладки сайта нет. Импорт синхронизируется в облако
+    обычным push (нужна настроенная фраза/конфиг; без них — просто
+    локальное объединение).
 
 ### 8.6. Сценарии
 

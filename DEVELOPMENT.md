@@ -22,6 +22,7 @@ extension/             ← грузится в Chrome как распакова�
   content/main.js         точка входа
   content/styles.css      стили (light/dark)
   shared/phrase.js        кодовая фраза, userId, PBKDF2/AES-GCM
+  shared/backup.js        экспорт/импорт отметок в JSON (бэкап, v0.2.4)
   options/                страница настроек (фраза, статус, синхронизация, статистика)
   background/service-worker.js  роутер сообщений + хранилище фразы + кэш статистики
   background/firebase.js  Realtime Database REST-клиент (GET/PATCH/sync)

@@ -528,6 +528,85 @@ async function main() {
     'atr:status отдаёт закэшированную статистику'
   );
 
+  console.log('\n[15] Бэкап: экспорт/импорт JSON (v0.2.4)');
+
+  // 15а: shared/backup.js — сериализация и валидация
+  const backup = await import(pathToFileURL(path.join(EXT, 'shared', 'backup.js')).href);
+  const ser = backup.serializeMarks({
+    '1': { m: 'read', t: 100 },
+    '2': { m: null, t: 200 },
+    'bad': { m: 'zzz' },
+    '3': { m: 'skip', t: 'x' }
+  });
+  const serData = JSON.parse(ser);
+  assert(serData.format === 'atr.marks' && serData.version === 1 && serData.count === 2, 'serializeMarks: формат/версия/count');
+  assert(serData.entries['1'].m === 'read' && serData.entries['2'].m === null, 'serializeMarks: томбстоуны включены');
+  assert(!('bad' in serData.entries) && !('3' in serData.entries), 'serializeMarks: мусор отброшен');
+
+  const pOk = backup.parseBackup(ser);
+  assert(pOk.count === 2 && pOk.entries['1'].t === 100, 'parseBackup: round-trip');
+  assert(!!backup.parseBackup('не json').error, 'parseBackup: битый JSON → ошибка');
+  assert(!!backup.parseBackup('{"format":"other"}').error, 'parseBackup: чужой формат → ошибка');
+  assert(!!backup.parseBackup(JSON.stringify({ format: 'atr.marks', version: 99, entries: {} })).error, 'parseBackup: неподдерживаемая версия → ошибка');
+  const pMixed = backup.parseBackup(
+    JSON.stringify({ format: 'atr.marks', version: 1, entries: { '9': { m: 'read', t: 5 }, 'x': 1, '10': { m: 'nope', t: 5 } } })
+  );
+  assert(pMixed.count === 1 && pMixed.entries['9'] && pMixed.entries['9'].m === 'read', 'parseBackup: невалидные записи отбракованы');
+
+  // 15б: снапшот в background (данные для экспорта)
+  await callSw({ type: 'atr:sync:sync', entries: { '77': { m: 'skip', t: 9 } } }, { tab: { id: 8 } });
+  assert(
+    swStore['atr.sync.snapshot'] && swStore['atr.sync.snapshot'].entries['77'].m === 'skip' && !!swStore['atr.sync.snapshot'].at,
+    'content-вкладка кэшировала снапшот для экспорта'
+  );
+  await callSw({ type: 'atr:sync:sync', entries: {} }, {});
+  assert(swStore['atr.sync.snapshot'].entries['77'], 'options (без sender.tab) снапшот не затирает');
+
+  // 15в: content применяет отложенный импорт (LWW, ключ удаляется, уходит push)
+  const dom15 = new JSDOM(HTML, { url: 'https://author.today/work/genre/fantasy', runScripts: 'outside-only', pretendToBeVisual: true });
+  const importStore = {};
+  const removed15 = [];
+  const sent15 = [];
+  dom15.window.chrome = {
+    runtime: {
+      sendMessage: async (msg) => {
+        sent15.push(msg);
+        if (msg.type === 'atr:sync:sync') return { ok: true, pull: {}, pushed: 1 };
+        return { ok: true };
+      }
+    },
+    storage: {
+      local: {
+        get: async (k) => (k in importStore ? { [k]: importStore[k] } : {}),
+        set: async (obj) => { Object.assign(importStore, obj); },
+        remove: async (k) => { removed15.push(k); delete importStore[k]; }
+      },
+      onChanged: { addListener: () => {} }
+    }
+  };
+  dom15.window.eval(read('content/storage.js'));
+  dom15.window.eval(read('content/sync.js'));
+
+  dom15.window.ATR.storage.set('659887', 'read'); // локальная отметка НОВЕЕ файла
+  const localT15 = dom15.window.ATR.storage.getStamp('659887');
+  importStore['atr.sync.pendingImport'] = {
+    '659887': { m: 'skip', t: 1760000000000 }, // старее локальной — не должно затереть
+    '777777': { m: 'read', t: 1760000000001 }, // новая — применяется
+    '888888': { m: null, t: 1760000000002 } // томбстоун файла — переносится
+  };
+  await dom15.window.ATR.sync.applyPendingImport();
+  assert(dom15.window.ATR.storage.get('777777') === 'read', 'импорт: новая отметка применена');
+  assert(dom15.window.ATR.storage.getStamp('777777') === 1760000000001, 'импорт: метка времени файла сохранена');
+  assert(
+    dom15.window.ATR.storage.get('659887') === 'read' && dom15.window.ATR.storage.getStamp('659887') === localT15,
+    'импорт: более новая локальная отметка не затёрта (LWW)'
+  );
+  assert(dom15.window.ATR.storage.getStamp('888888') > 0, 'импорт: томбстоун файла перенесён');
+  assert(removed15.includes('atr.sync.pendingImport'), 'импорт: ключ удалён после применения');
+  assert(await waitFor(() => sent15.some((m) => m.type === 'atr:sync:sync')), 'импорт: ушёл push');
+  await dom15.window.ATR.sync.applyPendingImport();
+  assert(removed15.filter((k) => k === 'atr.sync.pendingImport').length === 1, 'импорт: повторный вызов — no-op');
+
   delete globalThis.chrome;
 
   console.log(failures === 0 ? '\nВСЕ ТЕСТЫ ПРОЙДЕНЫ' : `\nПРОВАЛОВ: ${failures}`);

@@ -62,7 +62,7 @@
             <button id="btn-show" type="button">Показать</button>
             <button id="btn-copy" type="button">Копировать</button>
           </div>
-          <p class="muted">
+          <p class="alert-warning">
             Фраза — единственный доступ к облачным отметкам: без неё записи
             восстановить нельзя. Не передавайте её третьим лицам.
           </p>
@@ -76,6 +76,26 @@
       <p class="muted">
         «Выйти» удаляет фразу только с этого устройства — облачные отметки
         останутся, доступ к ним даст повторный ввод фразы.
+      </p>
+    </section>
+
+    <!-- Бэкап: экспорт/импорт JSON — видна ВСЕГДА, локальные данные (v0.2.4) -->
+    <section id="backup-block" class="card">
+      <h2>Бэкап</h2>
+      <div class="row">
+        <button id="btn-export" type="button">Экспорт JSON</button>
+        <button id="btn-import" type="button">Импорт JSON</button>
+        <input type="file" id="import-file" accept=".json,application/json" class="hidden">
+      </div>
+      <p id="backup-status" class="muted"></p>
+      <div class="row">
+        <button id="btn-open-site" type="button" class="primary hidden">Открыть author.today</button>
+      </div>
+      <p class="muted">
+        Экспорт выгружает отметки этого браузера в файл (данные — на момент
+        последней синхронизации с author.today). Импорт объединяет файл с
+        текущими отметками: более новые записи не затираются. Фраза и конфиг
+        для бэкапа не нужны.
       </p>
     </section>
 
