@@ -195,7 +195,10 @@ URL: `https://author.today/work/233831` — одиночная карточка 
 
 - `m ∈ {"read", "skip", null}`: `read`/`skip` — отметка; **`null` — томбстоун**
   (снятие отметки). Томбстоуны НЕ удаляются из объекта: без них удаление
-  «воскресло» бы на другом устройстве при следующем pull.
+  «воскресло» бы на другом устройстве при следующем pull. **Исключение (GC,
+  v0.2.1):** томбстоуны старше **90 дней** удаляются принудительно — но НИКОГДА
+  не самим content: список приходит из background в `res.gc` → `storage.applyGc()`
+  (самостоятельная чистка воскресила бы старую облачную отметку при pull), см. §8.
 - `t` — epoch_ms последнего изменения (проставляется в `set`/`remove`).
 - Снятие отметки = запись `{ m: null, t: now }` (в v0.1.0 было `delete`).
 - Запись атомарная: прочитал весь объект → изменил одно поле → записал весь объект.
@@ -303,6 +306,7 @@ author-today-read/
 | `remove(workId)`       | `(string) → void`                                 | **томбстоун** `{m: null, t}` (не `delete`); уже томбстоун → no-op                                                       |
 | `toggle(workId, mark)` | `(string, "read"\|"skip") → "read"\|"skip"\|null` | семантика §1.1; после изменения шлёт `document` событие `'atr:changed'` с `{detail:{workId}}`                           |
 | `mergeRemote(remote)`  | `(Object) → string[]`                             | LWW-слияние облачных данных: принимает запись, если её `t` **больше** локального; возвращает список изменившихся workId |
+| `applyGc(wids)`        | `(string[]) → string[]`                           | **GC (v0.2.1):** жёсткое удаление записей БЕЗ томбстоуна (иначе цикл); список приходит ТОЛЬКО из `res.gc` background; шлёт `document` событие `'atr:gc'` `{detail:{wids}}` (слушает dom.js для перерисовки; `atr:changed` НЕ шлём — пушить после gc нечего) |
 
 Константы: `ATR.storage.KEY_V2 = 'atr.v2.marks'`, `KEY_V1 = 'atr.v1.marks'`,
 `MARK_READ = 'read'`, `MARK_SKIP = 'skip'`.
@@ -312,8 +316,9 @@ author-today-read/
 | функция         | что делает                                                                                                                                                                                                                                                                                                |
 | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `isSupported()` | есть ли `chrome.runtime.sendMessage` (в тестах может отсутствовать)                                                                                                                                                                                                                                       |
-| `init()`        | подписка на `'atr:changed'` (debounce push 1.5 с), `focus` окна (pull не чаще 30 с) + первый `syncNow()` при загрузке страницы                                                                                                                                                                            |
-| `syncNow()`     | один round-trip: шлёт `{type:'atr:sync:sync', entries: getAll()}` → принимает `res.pull` → `storage.mergeRemote()` → `ui.renderAll(wid)` (БЕЗ события `atr:changed`, чтобы не зациклить push). Одновременно только один запрос (inFlight + pending). Ошибки/`skip` — молча, локальная работа продолжается |
+| `init()`        | подписка на `'atr:changed'` (debounce push 1.5 с), `focus` окна (pull не чаще 30 с), **`online` окна (немедленный повтор после восстановления сети, v0.2.1)** + первый `syncNow()` при загрузке страницы                                                                                                |
+| `syncNow()`     | один round-trip: шлёт `{type:'atr:sync:sync', entries: getAll()}` → принимает `res.pull` → `storage.mergeRemote()` → `ui.renderAll(wid)` (БЕЗ события `atr:changed`, чтобы не зациклить push) + `storage.applyGc(res.gc)` (v0.2.1). Одновременно только один запрос (inFlight + pending). Исходы: **ok** → сброс backoff; **skip** (нет конфига/фразы) → не ретраится; **fail** (сеть/SW) → `scheduleRetry()` |
+| `scheduleRetry()` / `resetRetry()` | **Ретраи (v0.2.1):** backoff `5с → 15с → 1м → 5м → 15м` (потолок, дальше каждые 15 м; таблица `retryDelays`, тестовый хук `__setRetryDelays`). Один ожидающий таймер (идемпотентно); успех обнуляет. Цепочка живёт, пока открыта вкладка — данные всегда в localStorage, смерть вкладки не теряет их |
 
 **`shared/phrase.js` (ES-модуль, options + background)**
 
@@ -333,7 +338,8 @@ author-today-read/
 | функция                         | что делает                                                                                                                                                                                                                                                                                                                                                      |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `loadConfig()`                  | кэшированный `fetch(chrome.runtime.getURL('background/config.json'))` (`.ok ? json : {}`, catch → пустой конфиг) → `{config, ready}` (ready = `!!databaseURL`; файла может не быть)                                                                                                                                                                             |
-| `initFirebase(config)` → клиент | `isReady()` (databaseURL), `pullDocs(userId)` (GET `{db}/users/{uid}/marks.json`; пустое дерево → `null` → `[]`), `sync(userId, phrase, localEntries)` → `{pull, pushed, skipped}`: расшифровывает облако, пушит локальное новее облака одним `PATCH` (RTDB мержит ветки), возвращает облачное новее локального. Ошибки HTTP — исключение со свойством `status` |
+| `initFirebase(config)` → клиент | `isReady()` (databaseURL), `pullDocs(userId)` (GET `{db}/users/{uid}/marks.json`; пустое дерево → `null` → `[]`), `sync(userId, phrase, localEntries)` → **`{pull, pushed, skipped, gc}`**: расшифровывает облако, пушит локальное новее облака одним `PATCH`, возвращает облачное новее локального + список `gc` протухших томбстоунов (v0.2.1, §8); `deleteDocs(userId, wids)` — PATCH с `{wid: null}` (удаление узлов). Ошибки HTTP — исключение со свойством `status` |
+| `GC_TOMBSTONE_MS` (экспорт)     | `90 * 24 * 60 * 60 * 1000` — срок жизни томбстоунов (v0.2.1); живые отметки GC не трогает никогда                                                                                                                                                                                                                                                             |
 
 **`background/service-worker.js` (роутер `chrome.runtime.onMessage`)**
 
@@ -342,7 +348,7 @@ author-today-read/
 | `atr:status`       | `→ {ok, configReady, hasPhrase, phrase, userId, lastSync, lastError, ready}` (`phrase` — для кнопок Показать/Копировать в options, §8.5)                                                                                                   |
 | `atr:phrase:set`   | `{phrase}` → валидация, `deriveUserId`, сохранение в `chrome.storage.local` → `{ok, userId}` / `{ok:false, error}`                                                                                                                         |
 | `atr:phrase:clear` | `→ {ok}` (удаляет фразу/userId/ошибку)                                                                                                                                                                                                     |
-| `atr:sync:sync`    | `{entries}` → полный round-trip с Realtime Database → `{ok, pull, pushed, skipped}` либо `{ok:false, skip:true, reason:'config'\|'phrase'}` (не ошибка!) либо `{ok:false, error}` (сеть/правила, текст сохраняется в `atr.sync.lastError`) |
+| `atr:sync:sync`    | `{entries}` → полный round-trip с Realtime Database → `{ok, pull, pushed, skipped, gc}` либо `{ok:false, skip:true, reason:'config'\|'phrase'}` (не ошибка!) либо `{ok:false, error}` (сеть/правила, текст сохраняется в `atr.sync.lastError`; content ретраит с backoff, §4.2) |
 
 `options/options.js` — чистый UI: `generatePhrase/validatePhrase/normalizePhrase`
 из shared + те же 4 сообщения; локальных данных не хранит.
@@ -370,18 +376,18 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 | `inject(target)`       | идемпотентно: если внутри уже есть `[data-atr-wid]` — выйти; иначе создать панель (`ATR.ui.create`) и вставить **сразу после ссылки на книгу**; после вставить `ATR.ui.render`                           |
 | `injectBookPage()`     | страница книги (§2.5): `workId` из `location.pathname`; идемпотентно (проверка `[data-atr-wid]` **внутри h1**) иначе `ATR.ui.create` → `h1.append(panel)` → `ATR.ui.render`; если `h1` не найден — выйти |
 | `scan()`               | полный проход: `findTargets()` + `inject()` **плюс** `injectBookPage()`; главный вход                                                                                                                    |
-| `start()`              | первичный `scan()` + `MutationObserver` на `document.body` (childList, subtree) с debounce ~150 мс + слушатели `'pjax:end'`, `'pjax:success'` (document), `'atr:changed'` (document), `storage` (window) |
+| `start()`              | первичный `scan()` + `MutationObserver` на `document.body` (childList, subtree) с debounce ~150 мс + слушатели `'pjax:end'`, `'pjax:success'` (document), `'atr:changed'` (document), `'atr:gc'` (document, v0.2.1 — перерисовка после GC), `storage` (window) |
 
 Идемпотентность — ключевое: повторные `scan()` **не должны дублировать** панели
 (проверка `target.querySelector('[data-atr-wid]')`).
 
-### 4.3. Структура manifest.json (v0.2.0)
+### 4.3. Структура manifest.json (v0.2.1)
 
 ```json
 {
   "manifest_version": 3,
   "name": "Author.Today — отметки книг",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Отметки ✅/❌ рядом с названиями книг в списках, таблицах и на странице книги. Синхронизация между устройствами через Firebase по кодовой фразе.",
   "permissions": ["storage"],
   "host_permissions": ["https://*.firebasedatabase.app/*"],
@@ -468,6 +474,14 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
     фразой → отметка в одном появляется в другом (дождаться push/pull: клик →
     ~1.5 с → открыть/фокус на второй вкладке); «Выйти» удаляет фразу с устройства,
     облачные данные остаются.
+18. **Ретраи (v0.2.1)**: отключить сеть (DevTools → Offline) → кликнуть отметку →
+    в консоли «синхронизация не удалась, будет повтор» → повторы идут с backoff;
+    включить сеть → событие `online` шлёт sync немедленно (без ожидания);
+    «нет конфига/фразы» (`skip`) повторов НЕ порождает. Автотест — секция [13].
+19. **GC томбстоунов (v0.2.1)**: снять отметку → в БД узел перезаписан
+    (`updatedAt` свежий, узел НЕ удалён — томбстоун свежий); записи старше
+    90 дней удаляются из БД (PATCH `{wid:null}`) и из localStorage через
+    `applyGc`; живые отметки GC не трогает. Автотесты — секция [12].
 
 ---
 
@@ -497,7 +511,7 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 
 ---
 
-## 8. Синхронизация с Firebase (v0.2.0)
+## 8. Синхронизация с Firebase (v0.2.0; доработки v0.2.1: ретраи + GC)
 
 ### 8.1. Архитектура
 
@@ -515,7 +529,11 @@ content/sync.js ─────────────────────�
 - **Один round-trip `atr:sync:sync`**: pull облака → сравнение по `t` (LWW) →
   push локального новее → вернуть облачное новее локального → `mergeRemote`.
 - Триггеры: загрузка любой страницы сайта, debounce 1.5 с после клика,
-  фокус окна (не чаще 30 с), ручная кнопка в options.
+  фокус окна (не чаще 30 с), ручная кнопка в options, **событие `online`
+  окна (немедленный повтор, v0.2.1)**.
+- **Ретраи при ошибке (v0.2.1)**: сбой сети/правил/SW → повтор с backoff
+  `5с → 15с → 1м → 5м → 15м` (потолок — каждые 15 мин), успех обнуляет;
+  `skip` (нет конфига/фразы) — НЕ сбой, не ретраится. Цепочка per-вкладка.
 - **Тишина при ошибке**: нет конфига/фразы/сети → локальная работа продолжается
   без ошибок в консоль; детали — `atr.sync.lastError` (видны в options).
 - Прочего фонового трафика нет: `chrome.alarms` не используется, popup нет.
@@ -555,7 +573,34 @@ users/{userId}/marks/{workId} → {
     `200 + null` → «данных нет»;
   - push: `PATCH {databaseURL}/users/{uid}/marks.json` с JSON-объектом
     `{workId: {updatedAt, v, iv, ct}, ...}` — RTDB мержит переданные ветки,
-    чужие workId не затрагивает (одна запись = один запрос).
+    чужие workId не затрагивает (одна запись = один запрос);
+  - **delete (GC, v0.2.1):** `PATCH` с `{workId: null, ...}` — в RTDB REST
+    `null` удаляет узел (отдельным запросом, только если есть что удалять).
+
+### 8.2а. GC томбстоунов (v0.2.1)
+
+- **Что удаляется:** только томбстоуны (`m:null`) старше **90 дней**
+  (`GC_TOMBSTONE_MS`); живые отметки — никогда.
+- **Где решается:** ТОЛЬКО в `background/firebase.js → sync()` — там видны и
+  облако, и локальный срез. Content НИКОГДА не чистит сам (иначе следующий
+  pull воскресил бы старую облачную отметку).
+- **Алгоритм** (cutoff = now − 90д):
+  1. расшифрованный облачный томбстоун старше cutoff → не отдаётся в `pull`,
+     wid добавляется в `gc`, узел удаляется из БД (`deleteDocs`);
+  2. локальный томбстоун старше cutoff → не пушится, wid в `gc`;
+  3. локальная запись **новее** протухшего облачного томбстоуна → пушится
+     по обычным правилам (перекрывает удаление), wid из `gc` убирается;
+  4. локальная запись **старше** протухшего облачного томбстоуна → не пушится
+     (иначе воскрешение), wid в `gc`;
+  5. живая облачная запись новее локального протухшего томбстоуна → обычная
+     жизнь: отдаётся в `pull`, merge чинит локальное, `gc` пуст.
+- **Контракт:** ответ `atr:sync:sync` содержит `gc: [workId]` → content вызывает
+  `storage.applyGc(wids)` — жёсткое удаление БЕЗ нового томбстоуна + событие
+  `'atr:gc'` → dom.js перерисовывает панели.
+- **Принятый риск:** устройство, молчащее дольше 90 дней, может затянуть и
+  запушить свою старую отметку после удаления узла (отсутствие узла протокол
+  читает как «данных нет», а не «удалено»). Порог 90 дней выбран пользователем;
+  сокращать его без запроса нельзя.
 
 ### 8.3. Криптография (shared/phrase.js)
 

@@ -25,6 +25,9 @@
 
 import { deriveKey, encryptMark, decryptMark } from '../shared/phrase.js';
 
+/** Срок жизни томбстоунов (v0.2.1): после — удаляются локально и в БД. */
+export const GC_TOMBSTONE_MS = 90 * 24 * 60 * 60 * 1000;
+
 /** Кэш ключа: PBKDF2 (100k) дорогой — не выводим на каждый sync. */
 let keyCache = { phrase: null, key: null };
 
@@ -94,20 +97,55 @@ export function initFirebase(config = {}) {
   }
 
   /**
+   * Удаление узлов (GC томбстоунов, v0.2.1): в RTDB REST значение null
+   * в теле PATCH удаляет ключ. Пустой список — запроса нет.
+   * Идемпотентно: несуществующий узел — no-op.
+   */
+  async function deleteDocs(userId, wids) {
+    if (!wids.length) return;
+    const patch = {};
+    for (const wid of wids) patch[wid] = null;
+    const res = await fetch(marksUrl(userId), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch)
+    });
+    if (!res.ok) throw httpError('delete', res);
+  }
+
+  /**
    * Полная синхронизация одним round-trip.
+   *
+   * Правила GC (v0.2.1, cutoff = now − 90 дней, работает только ТОМБСТОУН —
+   * живые отметки не удаляются никогда):
+   *   - облачный томбстоун старше cutoff: не отдаётся в pull, узел удаляется
+   *     из БД, wid попадает в gc (content вычищает свою локальную копию,
+   *     если она старше или тоже протухла);
+   *   - локальный томбстоун старше cutoff: не пушится, wid попадает в gc;
+   *   - локальная запись НОВЕЕ протухшего облачного томбстоуна — пушится
+   *     по обычным правилам (перекрывает удаление), wid из gc убирается;
+   *   - протухший томбстоун никогда не «воскрешает» чужие данные.
+   *
+   * ИЗВЕСТНЫЙ РИСК (принят): устройство, молчащее дольше 90 дней, может
+   * затянуть и запушить свою старую отметку после удаления узла — порог
+   * GC-окна выбран пользователем (AGENTS.md §8).
+   *
    * @param {string} userId — hex hash фразы (путь в БД)
    * @param {string} phrase — нормализованная кодовая фраза (ключ шифрования)
    * @param {Object} localEntries — локальный срез {wid: {m, t}} из content
-   * @returns {Promise<{pull: Object, pushed: number, skipped: number}>}
+   * @returns {Promise<{pull: Object, pushed: number, skipped: number, gc: string[]}>}
    *   pull — облачные записи НОВЕЕ локальных (расшифрованы, готовы к слиянию),
    *   pushed — сколько локальных записей ушло в облако,
-   *   skipped — сколько облачных записей не расшифровались (чужая фраза/битость)
+   *   skipped — сколько облачных записей не расшифровались (чужая фраза/битость),
+   *   gc — workId, которые content обязан жёстко удалить локально (applyGc)
    */
   async function sync(userId, phrase, localEntries) {
     const key = await getKeyForPhrase(phrase);
+    const cutoff = Date.now() - GC_TOMBSTONE_MS;
     const remoteDocs = await pullDocs(userId);
 
     const pull = {};
+    const gcSet = new Set();
     let skipped = 0;
     const remoteByWid = new Map();
 
@@ -116,6 +154,12 @@ export function initFirebase(config = {}) {
       remoteByWid.set(doc.workId, doc);
       try {
         const mark = await decryptMark(key, doc);
+        // Протухший облачный томбстоун: в pull не отдаём (иначе content его
+        // пере-добавит), планируем удаление узла и локальной копии.
+        if (mark === null && doc.updatedAt < cutoff) {
+          gcSet.add(doc.workId);
+          continue;
+        }
         pull[doc.workId] = { m: mark, t: doc.updatedAt };
       } catch (err) {
         skipped++;
@@ -123,23 +167,47 @@ export function initFirebase(config = {}) {
       }
     }
 
-    // 2) Что из локального новее облака — то пушим.
+    // 2) Что из локального новее облака — то пушим (с GC-исключениями).
     const toPush = [];
     for (const [workId, entry] of Object.entries(localEntries || {})) {
       if (!entry || typeof entry.t !== 'number') continue;
       if (entry.m !== 'read' && entry.m !== 'skip' && entry.m !== null) continue;
+
       const remote = remoteByWid.get(workId);
-      if (remote && remote.updatedAt >= entry.t) continue; // в облаке не старше
+
+      // Локальный протухший томбстоун: никогда не пушим.
+      if (entry.m === null && entry.t < cutoff) {
+        // Облачные данные живые и новее — их заберёт pull (merge сам поправит
+        // локальное), удалять в облако нельзя.
+        if (remote && !gcSet.has(workId) && remote.updatedAt > entry.t) continue;
+        gcSet.add(workId); // drop локально (+ удаление узла, если он есть)
+        continue;
+      }
+
+      if (remote && remote.updatedAt >= entry.t) {
+        // В облаке не старше — push не нужен. Если облачная версия это
+        // протухший томбстоун (wid уже в gcSet), локальная запись проиграла
+        // историческому удалению и вычистится через gc; иначе её поправит pull.
+        continue;
+      }
+
+      // Локальное новее (или облака нет) — пушим; перекрывает протухший
+      // облачный томбстоун, поэтому wid из gc убираем.
       const encrypted = await encryptMark(key, entry.m);
       toPush.push({ workId, updatedAt: entry.t, ...encrypted });
+      gcSet.delete(workId);
     }
     await pushDocs(userId, toPush);
 
-    // 3) Из pull убираем записи, которые мы только что запушили (они уже
+    // 3) Удаляем протухшие томбстоуны из БД (отдельным PATCH с null).
+    const gc = [...gcSet];
+    if (gc.length) await deleteDocs(userId, gc);
+
+    // 4) Из pull убираем записи, которые мы только что запушили (они уже
     //    согласованы; локальная версия новее или равна).
     for (const doc of toPush) delete pull[doc.workId];
 
-    return { pull, pushed: toPush.length, skipped };
+    return { pull, pushed: toPush.length, skipped, gc };
   }
 
   function isReady() {

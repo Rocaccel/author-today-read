@@ -169,6 +169,13 @@
       else renderExisting();
     });
 
+    // 3а) GC (v0.2.1): background вычистил протухшие томбстоуны —
+    //     перерисовываем затронутые панели (событие шлёт storage.applyGc).
+    document.addEventListener('atr:gc', (e) => {
+      const wids = e && e.detail && e.detail.wids;
+      if (Array.isArray(wids)) for (const wid of wids) ATR.ui.renderAll(wid);
+    });
+
     // 4) Изменение отметки в ДРУГОЙ вкладке: нативное событие `storage`.
     window.addEventListener('storage', (e) => {
       if (e.key === null || e.key === ATR.storage.KEY_V2) renderExisting();

@@ -200,6 +200,39 @@
     }
   }
 
+  /**
+   * Жёсткое удаление записей по списку workId (GC, v0.2.1).
+   *
+   * Отличие от remove(): БЕЗ создания томбстоуна — иначе получился бы цикл
+   * «удалили → снова записали мусор». Список приходит ТОЛЬКО из background
+   * (res.gc в ответе atr:sync:sync): content сам никогда не чистит протухшие
+   * томбстоуны — иначе следующий pull воскресил бы старую облачную отметку.
+   *
+   * Событие 'atr:gc' (детально: {wids}) слушает dom.js для перерисовки.
+   * 'atr:changed' не шлём: после gc пушить нечего — облако уже согласовано.
+   */
+  function applyGc(wids) {
+    if (!Array.isArray(wids) || !wids.length) return [];
+    const all = getAll();
+    const removed = [];
+    for (const wid of wids) {
+      const key = String(wid);
+      if (key in all) {
+        delete all[key];
+        removed.push(key);
+      }
+    }
+    if (removed.length) {
+      writeRaw(all);
+      try {
+        document.dispatchEvent(new CustomEvent('atr:gc', { detail: { wids: removed } }));
+      } catch (err) {
+        console.error('[ATR] не удалось разослать событие atr:gc:', err);
+      }
+    }
+    return removed;
+  }
+
   ATR.storage = {
     KEY_V2,
     KEY_V1,
@@ -211,6 +244,7 @@
     set,
     remove,
     toggle,
-    mergeRemote
+    mergeRemote,
+    applyGc
   };
 })();

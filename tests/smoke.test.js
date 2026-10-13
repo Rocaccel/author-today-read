@@ -294,6 +294,166 @@ async function main() {
   assert(syncMsgs.length >= 2, 'после клика отправлен повторный sync (debounce push)');
   assert(syncMsgs[1] && syncMsgs[1].entries['659887'] && syncMsgs[1].entries['659887'].m === 'read', 'в push ушла новая отметка');
 
+  console.log('\n[12] GC томбстоунов: storage.applyGc + firebase.sync (мок fetch)');
+
+  // --- storage.applyGc: жёсткое удаление без создания томбстоуна ---
+  let gcEventDetail = null;
+  dom5.window.document.addEventListener('atr:gc', (e) => {
+    gcEventDetail = e.detail;
+  });
+  const S5b = dom5.window.ATR.storage;
+  S5b.set('777', 'read');
+  S5b.applyGc(['777', 'нет-такой']);
+  assert(S5b.getAll()['777'] === undefined, 'applyGc жёстко удалил запись (без томбстоуна)');
+  assert(gcEventDetail && gcEventDetail.wids.includes('777'), 'applyGc отправил событие atr:gc');
+
+  // --- firebase.sync: GC-логика (реальный WebCrypto, мокнутый fetch) ---
+  const realFetch = globalThis.fetch;
+  const fb = await import(pathToFileURL(path.join(EXT, 'background', 'firebase.js')).href);
+  const gcPhrase = 'моя очень секретная фраза из пятнадцати слов совсем секретная';
+  const gcKey = await phrase.deriveKey(gcPhrase);
+  const GC_MS = fb.GC_TOMBSTONE_MS;
+  const DAY = 24 * 60 * 60 * 1000;
+  assert(GC_MS === 90 * DAY, 'GC_TOMBSTONE_MS = 90 дней');
+
+  let cloud = {};
+  const fetchLog = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    const method = opts.method || 'GET';
+    fetchLog.push({ method, body: opts.body ? JSON.parse(opts.body) : null });
+    if (method === 'GET') {
+      return { ok: true, json: async () => (Object.keys(cloud).length ? cloud : null) };
+    }
+    return { ok: true, json: async () => null };
+  };
+  const client = fb.initFirebase({ databaseURL: 'https://fake-rtdb.example.test' });
+  const UID = 'a'.repeat(64);
+  const encDoc = async (mark, t) => ({ updatedAt: t, ...(await phrase.encryptMark(gcKey, mark)) });
+
+  // A: свежий томбстоун — пушится как обычная запись, gc пуст
+  cloud = {};
+  fetchLog.length = 0;
+  let r = await client.sync(UID, gcPhrase, { '1': { m: null, t: Date.now() - 3600000 } });
+  assert(r.gc.length === 0, 'A: свежий томбстоун не попал в gc');
+  assert(r.pushed === 1, 'A: свежий томбстоун запушен в облако');
+  const pushA = fetchLog.find((c) => c.method === 'PATCH');
+  assert(pushA && pushA.body['1'] !== null && typeof pushA.body['1'] === 'object', 'A: в БД ушёл объект, а не null');
+
+  // B: протухший локальный томбстоун — gc + удаление узла, без пуша
+  cloud = {};
+  fetchLog.length = 0;
+  r = await client.sync(UID, gcPhrase, { '2': { m: null, t: Date.now() - GC_MS - 2 * DAY } });
+  assert(r.gc.length === 1 && r.gc[0] === '2', 'B: протухший локальный томбстоун в gc');
+  assert(r.pushed === 0, 'B: протухший томбстоун не пушится');
+  const patchB = fetchLog.filter((c) => c.method === 'PATCH');
+  assert(patchB.length === 1 && patchB[0].body['2'] === null, 'B: PATCH с null — узел удалён из БД');
+
+  // C: протухший облачный томбстоун новее локальной отметки — no-resurrect
+  cloud = { '3': await encDoc(null, Date.now() - GC_MS - 2 * DAY) };
+  fetchLog.length = 0;
+  r = await client.sync(UID, gcPhrase, { '3': { m: 'read', t: Date.now() - GC_MS - 10 * DAY } });
+  assert(!r.pull['3'], 'C: протухший облачный томбстоун не отдан в pull');
+  assert(r.gc.includes('3'), 'C: wid протухшего облачного томбстоуна в gc');
+  assert(r.pushed === 0, 'C: локальная отметка старше удаления — не пушится (нет воскрешения)');
+  const patchC = fetchLog.filter((c) => c.method === 'PATCH');
+  assert(patchC.length === 1 && patchC[0].body['3'] === null, 'C: узел удалён из БД');
+
+  // D: локальная запись НОВЕЕ протухшего облачного томбстоуна — пуш побеждает GC
+  cloud = { '4': await encDoc(null, Date.now() - GC_MS - 2 * DAY) };
+  fetchLog.length = 0;
+  r = await client.sync(UID, gcPhrase, { '4': { m: 'skip', t: Date.now() - 1000 } });
+  assert(r.gc.length === 0, 'D: перекрытие протухшего томбстоуна свежей отметкой — gc пуст');
+  const patchD = fetchLog.filter((c) => c.method === 'PATCH');
+  assert(patchD.length === 1 && patchD[0].body['4'] !== null, 'D: ушла в БД свежая отметка, удаление отменено');
+
+  // E: живая облачная запись новее локального протухшего томбстоуна — чинит pull
+  cloud = { '5': await encDoc('read', Date.now() - 1000) };
+  fetchLog.length = 0;
+  r = await client.sync(UID, gcPhrase, { '5': { m: null, t: Date.now() - GC_MS - 5 * DAY } });
+  assert(r.pull['5'] && r.pull['5'].m === 'read', 'E: живая облачная запись отдана в pull (merge поправит локальную)');
+  assert(r.gc.length === 0, 'E: живое содержимое облака не удаляется');
+  assert(fetchLog.filter((c) => c.method === 'PATCH').length === 0, 'E: PATCH не отправлялся вообще');
+
+  // F: старые ЖИВЫЕ отметки GC не трогает (истёк только томбстоун)
+  cloud = { '6': await encDoc('read', Date.now() - 400 * DAY) };
+  fetchLog.length = 0;
+  r = await client.sync(UID, gcPhrase, { '6': { m: 'skip', t: Date.now() - 400 * DAY - 1000 } });
+  assert(r.gc.length === 0, 'F: 400-дневная живая отметка не попадает в gc');
+  assert(r.pull['6'] && r.pull['6'].m === 'read', 'F: живая отметка отдана в pull');
+  assert(fetchLog.filter((c) => c.method === 'PATCH').length === 0, 'F: живые записи не удаляются из БД');
+
+  globalThis.fetch = realFetch;
+
+  console.log('\n[13] Ретраи синхронизации: backoff, сброс, skip, событие online');
+
+  /** Ждать условия не дольше ms (опрос каждые 20 мс). */
+  async function waitFor(cond, ms = 3000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms) {
+      if (cond()) return true;
+      await sleep(20);
+    }
+    return cond();
+  }
+
+  /**
+   * Фикстура с управляемым chrome-стабом. Порядок eval как в manifest,
+   * но __setRetryDelays вызывается ДО main.js (иначе init успеет
+   * запланировать первый ретрай с дефолтными 5 с).
+   */
+  function makeRetryDom(modeBox, delays) {
+    const d = new JSDOM(HTML, { url: 'https://author.today/work/genre/fantasy', runScripts: 'outside-only', pretendToBeVisual: true });
+    const calls = [];
+    d.window.chrome = {
+      runtime: {
+        sendMessage: async (msg) => {
+          calls.push(msg);
+          if (msg.type !== 'atr:sync:sync') return { ok: true };
+          if (modeBox.mode === 'throw') throw new Error('SW недоступен');
+          if (modeBox.mode === 'fail') return { ok: false, error: 'network down' };
+          if (modeBox.mode === 'skip') return { ok: false, skip: true, reason: 'config' };
+          return { ok: true, pull: {}, pushed: 0, gc: [] };
+        }
+      }
+    };
+    d.window.eval(read('content/storage.js'));
+    d.window.eval(read('content/sync.js'));
+    d.window.ATR.sync.__setRetryDelays(delays);
+    for (const f of ['content/ui.js', 'content/dom.js', 'content/main.js']) d.window.eval(read(f));
+    return { d, calls };
+  }
+
+  // 13а: fail → повтор → throw → повтор → ok → сброс, дальше тихо
+  const boxA = { mode: 'fail' };
+  const A = makeRetryDom(boxA, [80, 120]);
+  assert(await waitFor(() => A.calls.length >= 1), '13а: первый sync уходит при загрузке (и падает)');
+  assert(await waitFor(() => A.calls.length >= 2), '13а: после неудачи выполнен повтор с backoff (80 мс)');
+  boxA.mode = 'throw';
+  assert(await waitFor(() => A.calls.length >= 3), '13а: исключение sendMessage тоже ретраится (120 мс)');
+  boxA.mode = 'ok';
+  assert(await waitFor(() => A.calls.length >= 4), '13а: после восстановления связи повтор выполнен');
+  await sleep(350);
+  assert(A.calls.length === 4, '13а: успех сбросил backoff — новых вызовов нет');
+
+  // 13б: skip (нет конфига/фразы) — не сбой, повторов нет
+  const boxB = { mode: 'skip' };
+  const B = makeRetryDom(boxB, [50]);
+  assert(await waitFor(() => B.calls.length >= 1), '13б: sync при загрузке');
+  await sleep(150);
+  assert(B.calls.length === 1, '13б: skip не порождает повторов (это не ошибка)');
+
+  // 13с: событие online — немедленный повтор мимо backoff
+  const boxC = { mode: 'fail' };
+  const C = makeRetryDom(boxC, [10000]);
+  assert(await waitFor(() => C.calls.length >= 1), '13с: ошибка → повтор отложен (10 с)');
+  await sleep(50);
+  assert(C.calls.length === 1, '13с: до срабатывания backoff повторов нет');
+  boxC.mode = 'ok';
+  C.d.window.dispatchEvent(new C.d.window.Event('online'));
+  assert(await waitFor(() => C.calls.length >= 2), '13с: online выполнил синхронизацию немедленно');
+  await sleep(150);
+  assert(C.calls.length === 2, '13с: после успеха лишних вызовов нет');
+
   console.log(failures === 0 ? '\nВСЕ ТЕСТЫ ПРОЙДЕНЫ' : `\nПРОВАЛОВ: ${failures}`);
   process.exit(failures === 0 ? 0 : 1);
 }

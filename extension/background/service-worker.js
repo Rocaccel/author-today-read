@@ -1,7 +1,7 @@
 /**
  * Background service worker (Manifest V3, ES-модуль).
  *
- * Роль в v0.2.0: единственное место с СЕТЬЮ (CORS расширения) и хранилищем
+ * Роль: единственное место с СЕТЬЮ (CORS расширения) и хранилищем
  * кодовой фразы. Content-скрипты общаются с ним через chrome.runtime.
  *
  * Протокол сообщений (см. AGENTS.md §8):
@@ -100,7 +100,15 @@ async function handleSync(msg) {
     const result = await client.sync(userId, phrase, (msg && msg.entries) || {});
     await chrome.storage.local.set({ [K_LAST_SYNC]: new Date().toISOString() });
     await setLastError(null);
-    return { ok: true, pull: result.pull, pushed: result.pushed, skipped: result.skipped };
+    // gc (v0.2.1) — workId протухших томбстоунов: content жёстко удалит их
+    // локально через storage.applyGc (узлы в БД уже удалены в firebase.js).
+    return {
+      ok: true,
+      pull: result.pull,
+      pushed: result.pushed,
+      skipped: result.skipped,
+      gc: result.gc || []
+    };
   } catch (err) {
     // Ошибка сети/правил — сохраняем для options, content остаётся тихим.
     let message = String(err && err.message ? err.message : err);
