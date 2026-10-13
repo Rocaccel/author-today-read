@@ -304,7 +304,8 @@ author-today-read/
 ├── package.json                 ← тесты + `npm run config` (jsdom devDependency)
 ├── scripts/
 │   ├── apply-config.js          ← .env → extension/background/config.json (npm run config)
-│   └── perf.js                  ← A/B-замер влияния расширения на скорость страницы (npm run perf)
+│   ├── perf.js                  ← A/B-замер влияния расширения на скорость страницы (npm run perf)
+│   └── release.ps1              ← релиз §9 одной командой: zip/crx/тег/gh release (npm run release)
 ├── tests/
 │   └── smoke.test.js            ← автотесты jsdom (инжект, семантика, v2, LWW, фраза, крипто, sync)
 └── extension/                   ← содержимое расширения (грузится в Chrome)
@@ -817,6 +818,15 @@ users/{userId}/marks/{workId} → {
 ---
 
 ## 9. Релизы
+
+**Автоматизация:** `npm run release` (`scripts/release.ps1`, PowerShell 5.1)
+выполняет пункты 1–5 одной командой. Ключи: `-BuildOnly` (только ассеты в
+`dist/`, без тега/публикации), `-Title`/`-Notes` (заголовок/ноты релиза;
+дефолт нот — `git log` с прошлого тега), `-Version` (иначе из
+`manifest.json`), `-Chrome` (путь к chromium для `--pack-extension`).
+Требования: авторизованный `gh` CLI, `extension.pem`, `.env` с
+`FIREBASE_DATABASE_URL`; в режиме публикации — чистое дерево, `main`
+синхронизирован с `origin/main`, тега ещё нет.
 
 1. Работа в ветке → merge в `main` → тег `vX.Y.Z` на итоговом коммите →
    `git push origin main vX.Y.Z`.

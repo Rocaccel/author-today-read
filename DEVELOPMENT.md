@@ -76,6 +76,21 @@ npm run perf -- --runs=10 # стабильнее медиана
 текст после load) и **TaskDuration/ScriptDuration** (работа главного
 потока). Разброс велик → `--runs=10`.
 
+## Релиз (§9 одной командой)
+
+`npm run release` (`scripts/release.ps1`, PowerShell 5.1) — полный §9:
+проверки (чистое дерево, `main` синхронизирован, тега нет) → `databaseURL`
+из `.env` (парсер — `npm run config`) → `dist/author-today-read-X.Y.Z.zip`
+(пути через `/`, .NET CreateEntry) + `.crx` (стабильный ID через
+`extension.pem`) → `git tag` → `git push origin main vX.Y.Z` →
+`gh release create`.
+
+- Только собрать ассеты без публикации: `npm run release -- -BuildOnly`.
+- Заголовок/ноты: `-Title` / `-Notes` (дефолт нот — `git log` с прошлого
+  тега; дефолт заголовка — первая `feat:`-запись с прошлого тега).
+- Требует: `gh` CLI (авторизован), `extension.pem`, `.env` с
+  `FIREBASE_DATABASE_URL` (без него релиз не работает «из коробки», §9.4).
+
 ## Настройка синхронизации из исходников
 
 В релизном архиве (README, Вариант А) конфиг Firebase **уже встроен** —

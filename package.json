@@ -6,7 +6,8 @@
   "scripts": {
     "test": "node tests/smoke.test.js",
     "config": "node scripts/apply-config.js",
-    "perf": "node scripts/perf.js"
+    "perf": "node scripts/perf.js",
+    "release": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1"
   },
   "devDependencies": {
     "jsdom": "^24.0.0"
