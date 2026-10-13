@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Author.Today — отметки книг",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Отметки ✅/❌ рядом с названиями книг в списках, таблицах и на странице книги. Синхронизация между устройствами через Firebase по кодовой фразе.",
   "permissions": ["storage"],
   "host_permissions": ["https://*.firebasedatabase.app/*"],

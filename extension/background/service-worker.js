@@ -23,6 +23,33 @@ const K_PHRASE = 'atr.sync.phrase';
 const K_USER = 'atr.sync.userId';
 const K_LAST_SYNC = 'atr.sync.lastSync';
 const K_LAST_ERROR = 'atr.sync.lastError';
+const K_STATS = 'atr.sync.stats'; // {read, skip, total, at} — кэш счётчиков (v0.2.2)
+
+/**
+ * Счётчики из локального среза {wid: {m, t}} (v0.2.2).
+ * Томбстоуны (m:null) и мусор не считаются; total = read + skip.
+ */
+export function computeStats(entries) {
+  let read = 0;
+  let skip = 0;
+  for (const entry of Object.values(entries || {})) {
+    if (!entry || typeof entry !== 'object') continue;
+    if (entry.m === 'read') read++;
+    else if (entry.m === 'skip') skip++;
+  }
+  return { read, skip, total: read + skip, at: new Date().toISOString() };
+}
+
+/**
+ * Кэшировать счётчики. Вызывается из handleSync ТОЛЬКО для сообщений от
+ * content-вкладок (sender.tab): options шлёт atr:sync:sync с entries:{} —
+ * без этой проверки он обнулял бы статистику. Кэш обновляется ДО проверок
+ * конфига/фразы — счётчики локальные и работают без синхронизации.
+ */
+async function saveStatsFrom(entries, sender) {
+  if (!sender || !sender.tab || !entries || typeof entries !== 'object') return;
+  await chrome.storage.local.set({ [K_STATS]: computeStats(entries) });
+}
 
 /** Сохранённая фраза (нормализованная) или null. */
 async function getPhrase() {
@@ -44,7 +71,7 @@ async function setLastError(message) {
 async function handleStatus() {
   const { config } = await loadConfig();
   const [phrase, userId] = await Promise.all([getPhrase(), getUserId()]);
-  const data = await chrome.storage.local.get([K_LAST_SYNC, K_LAST_ERROR]);
+  const data = await chrome.storage.local.get([K_LAST_SYNC, K_LAST_ERROR, K_STATS]);
   const configReady = !!(config.databaseURL && config.databaseURL.startsWith('https://'));
   return {
     ok: true,
@@ -56,6 +83,9 @@ async function handleStatus() {
     userId: userId || null,
     lastSync: data[K_LAST_SYNC] || null,
     lastError: data[K_LAST_ERROR] || null,
+    // Локальная статистика (v0.2.2): доступна ВСЕГДА, без фразы и конфига —
+    // считается из localStorage страницы (кэш обновляет content при каждом sync).
+    stats: data[K_STATS] || { read: 0, skip: 0, total: 0, at: null },
     // полная готовность к синхронизации
     ready: configReady && !!phrase
   };
@@ -82,7 +112,11 @@ async function handlePhraseClear() {
  * atr:sync:sync — полный round-trip:
  * pull облака → LWW-сравнение с локальным срезом → push новых → вернуть pull.
  */
-async function handleSync(msg) {
+async function handleSync(msg, sender) {
+  // Статистика (v0.2.2): кэш счётчиков обновляется в первую очередь —
+  // до проверок конфига/фразы (локальные данные) и только от content-вкладок.
+  await saveStatsFrom(msg && msg.entries, sender);
+
   const { config, ready } = await loadConfig();
   if (!ready) return { ok: false, skip: true, reason: 'config' };
 
@@ -132,7 +166,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const handler = handlers[type];
   if (!handler) return false;
 
-  handler(msg)
+  handler(msg, sender)
     .then(sendResponse)
     .catch((err) => sendResponse({ ok: false, error: String(err && err.message ? err.message : err) }));
   return true;

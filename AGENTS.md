@@ -215,7 +215,9 @@ URL: `https://author.today/work/233831` — одиночная карточка 
 ### 3.3. Фраза и статусы — `chrome.storage.local` (background)
 
 - Ключи: `atr.sync.phrase` (нормализованная фраза), `atr.sync.userId`,
-  `atr.sync.lastSync`, `atr.sync.lastError`.
+  `atr.sync.lastSync`, `atr.sync.lastError`,
+  **`atr.sync.stats`** (`{read, skip, total, at}` — кэш счётчиков, v0.2.2;
+  обновляется из content-вкладок при каждом `atr:sync:sync`, см. §4.2/§8.5).
 - Фраза хранится ТОЛЬКО здесь (читает только расширение); в page localStorage
   не попадает — сайт author.today её не видит.
 - Требует `"permissions": ["storage"]` в manifest.
@@ -257,7 +259,7 @@ author-today-read/
     │   ├── options.js           ← генерация/ввод фразы, статус, ручная синхронизация, выход
     │   └── options.css
     └── background/
-        ├── service-worker.js    ← ES-модуль: роутер сообщений + хранилище фразы
+        ├── service-worker.js    ← ES-модуль: роутер сообщений + хранилище фразы + кэш статистики
         ├── firebase.js          ← Realtime Database REST-клиент (GET/PATCH .json + sync)
         └── config.json          ← ГЕНЕРИРУЕТСЯ из .env (GITIGNORE, в свежем клоне отсутствует)
 ```
@@ -345,10 +347,15 @@ author-today-read/
 
 | сообщение          | вход → выход                                                                                                                                                                                                                               |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `atr:status`       | `→ {ok, configReady, hasPhrase, phrase, userId, lastSync, lastError, ready}` (`phrase` — для кнопок Показать/Копировать в options, §8.5)                                                                                                   |
+| `atr:status`       | `→ {ok, configReady, hasPhrase, phrase, userId, lastSync, lastError, stats, ready}` (`phrase` — для кнопок Показать/Копировать в options, §8.5; **`stats`** — `{read, skip, total, at}`, дефолт нули, v0.2.2)                             |
 | `atr:phrase:set`   | `{phrase}` → валидация, `deriveUserId`, сохранение в `chrome.storage.local` → `{ok, userId}` / `{ok:false, error}`                                                                                                                         |
 | `atr:phrase:clear` | `→ {ok}` (удаляет фразу/userId/ошибку)                                                                                                                                                                                                     |
-| `atr:sync:sync`    | `{entries}` → полный round-trip с Realtime Database → `{ok, pull, pushed, skipped, gc}` либо `{ok:false, skip:true, reason:'config'\|'phrase'}` (не ошибка!) либо `{ok:false, error}` (сеть/правила, текст сохраняется в `atr.sync.lastError`; content ретраит с backoff, §4.2) |
+| `atr:sync:sync`    | `{entries}` → **сначала кэш статистики** (v0.2.2: `computeStats(entries)` → `atr.sync.stats`, ТОЛЬКО если `sender.tab` — options со своим `entries:{}` счётчики не трогает; до проверок конфига/фразы) → полный round-trip с Realtime Database → `{ok, pull, pushed, skipped, gc}` либо `{ok:false, skip:true, reason:'config'\|'phrase'}` (не ошибка!) либо `{ok:false, error}` (сеть/правила, текст сохраняется в `atr.sync.lastError`; content ретраит с backoff, §4.2) |
+
+`computeStats(entries)` — экспорт service-worker.js: `{read, skip, total, at}`;
+томбстоуны (`m:null`) и мусор не считаются, `total = read + skip`.
+Роутер передаёт хендлерам `(msg, sender)` — `sender.tab` отличает
+content-вкладку от options-страницы.
 
 `options/options.js` — чистый UI: `generatePhrase/validatePhrase/normalizePhrase`
 из shared + те же 4 сообщения; локальных данных не хранит.
@@ -381,13 +388,13 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 Идемпотентность — ключевое: повторные `scan()` **не должны дублировать** панели
 (проверка `target.querySelector('[data-atr-wid]')`).
 
-### 4.3. Структура manifest.json (v0.2.1)
+### 4.3. Структура manifest.json (v0.2.2)
 
 ```json
 {
   "manifest_version": 3,
   "name": "Author.Today — отметки книг",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Отметки ✅/❌ рядом с названиями книг в списках, таблицах и на странице книги. Синхронизация между устройствами через Firebase по кодовой фразе.",
   "permissions": ["storage"],
   "host_permissions": ["https://*.firebasedatabase.app/*"],
@@ -482,6 +489,10 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
     (`updatedAt` свежий, узел НЕ удалён — томбстоун свежий); записи старше
     90 дней удаляются из БД (PATCH `{wid:null}`) и из localStorage через
     `applyGc`; живые отметки GC не трогает. Автотесты — секция [12].
+20. **Статистика (v0.2.2)**: options → блок «Статистика» виден всегда (без
+    фразы/конфига); после кликов на author.today счётчики ✅/❌ совпадают с
+    отмеченными книгами; синк из options (свой `entries:{}`) счётчики НЕ
+    обнуляет; без visited-сайта — нули (кэш пуст). Автотест — секция [14].
 
 ---
 
@@ -639,6 +650,11 @@ users/{userId}/marks/{workId} → {
   сейчас» (`atr:sync:sync` с пустым `entries` — pull+проверка связи;
   дошлёт локальное только content-вкладка), «Выйти» (`atr:phrase:clear`).
   Фраза нужна в любой момент: потеря = потеря доступа к облаку (§8.6).
+- **«Статистика»** (v0.2.2): карточка с тремя числами — `✅ Прочитано`,
+  `❌ Пропущено`, `Всего отмечено` (+ muted-примечание). Видна **всегда**,
+  даже без фразы и конфига: счётчики локальные. Данные — `atr:status` →
+  поле `stats` (кэш `atr.sync.stats`, заполняет content при каждом sync,
+  §3.3/§4.2). Рендер — `renderStats()` в `options.js` без условия на фразу.
 
 ### 8.6. Сценарии
 

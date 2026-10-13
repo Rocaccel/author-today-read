@@ -1,6 +1,6 @@
 {
   "name": "author-today-read",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Тесты расширения «Author.Today — отметки книг». Само расширение от npm не зависит — см. AGENTS.md.",
   "scripts": {

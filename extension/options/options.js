@@ -49,6 +49,7 @@ function renderStatus(status) {
   show($('config-warning'), !status.configReady);
   show($('login-block'), status.configReady && !status.hasPhrase);
   show($('status-block'), status.hasPhrase);
+  renderStats(status.stats);
 
   // Фраза приходит из atr:status; маскируем по умолчанию (см. §8.5 AGENTS.md)
   currentPhrase = status.phrase || null;
@@ -68,6 +69,14 @@ function renderStatus(status) {
     show(errBox, !!status.lastError);
     if (status.lastError) errBox.textContent = 'Ошибка: ' + status.lastError;
   }
+}
+
+/** Счётчики (v0.2.2): блок виден всегда, даже без фразы и конфига. */
+function renderStats(stats) {
+  const s = stats && typeof stats === 'object' ? stats : {};
+  $('stat-read').textContent = String(Number(s.read) || 0);
+  $('stat-skip').textContent = String(Number(s.skip) || 0);
+  $('stat-total').textContent = String(Number(s.total) || 0);
 }
 
 /** Загрузка статуса. */

@@ -454,6 +454,80 @@ async function main() {
   await sleep(150);
   assert(C.calls.length === 2, '13с: после успеха лишних вызовов нет');
 
+  console.log('\n[14] Статистика в параметрах: computeStats + кэш в background (v0.2.2)');
+
+  // chrome-стаб для импорта service-worker.js (роутер ловим через addListener)
+  let swListener = null;
+  const swStore = {};
+  globalThis.chrome = {
+    runtime: {
+      onMessage: { addListener: (fn) => { swListener = fn; } },
+      onInstalled: { addListener: () => {} },
+      // в тесте config.json не читается (fetch file:// отклоняется) → skip
+      getURL: (p) => 'file:///' + p.replace(/\\/g, '/')
+    },
+    storage: {
+      local: {
+        get: async (keys) => {
+          const list = Array.isArray(keys) ? keys : [keys];
+          const out = {};
+          for (const k of list) if (k in swStore) out[k] = swStore[k];
+          return out;
+        },
+        set: async (obj) => { Object.assign(swStore, obj); },
+        remove: async (keys) => {
+          for (const k of Array.isArray(keys) ? keys : [keys]) delete swStore[k];
+        }
+      }
+    }
+  };
+  const sw = await import(pathToFileURL(path.join(EXT, 'background', 'service-worker.js')).href);
+  assert(typeof swListener === 'function' && typeof sw.computeStats === 'function', 'роутер сообщений и computeStats доступны');
+
+  const st14 = sw.computeStats({
+    '1': { m: 'read', t: 1 },
+    '2': { m: 'read', t: 1 },
+    '3': { m: 'skip', t: 1 },
+    '4': { m: null, t: 1 },
+    '5': { m: 'zzz' },
+    '6': 'мусор'
+  });
+  assert(
+    st14.read === 2 && st14.skip === 1 && st14.total === 3,
+    'computeStats: read/skip посчитаны, томбстоун и мусор не считаются'
+  );
+
+  const callSw = (msg, sender) => new Promise((resolve) => {
+    swListener(msg, sender, resolve);
+  });
+
+  let st = await callSw({ type: 'atr:status' }, {});
+  assert(st.ok && st.stats && st.stats.total === 0 && st.stats.at === null, 'atr:status без кэша — нулевая статистика');
+
+  const syncRes = await callSw(
+    {
+      type: 'atr:sync:sync',
+      entries: { '1': { m: 'read', t: 1 }, '2': { m: 'read', t: 1 }, '3': { m: 'skip', t: 1 }, '4': { m: null, t: 1 } }
+    },
+    { tab: { id: 7 } }
+  );
+  assert(syncRes.skip === true, 'синк без конфига — skip (в тесте нет config.json)');
+  assert(
+    swStore['atr.sync.stats'] && swStore['atr.sync.stats'].read === 2 && swStore['atr.sync.stats'].total === 3,
+    'content-вкладка (sender.tab) обновила кэш статистики до проверки конфига'
+  );
+
+  await callSw({ type: 'atr:sync:sync', entries: {} }, {});
+  assert(swStore['atr.sync.stats'].total === 3, 'options (без sender.tab) с entries:{} не обнуляет счётчики');
+
+  st = await callSw({ type: 'atr:status' }, {});
+  assert(
+    st.stats.read === 2 && st.stats.skip === 1 && st.stats.total === 3 && !!st.stats.at,
+    'atr:status отдаёт закэшированную статистику'
+  );
+
+  delete globalThis.chrome;
+
   console.log(failures === 0 ? '\nВСЕ ТЕСТЫ ПРОЙДЕНЫ' : `\nПРОВАЛОВ: ${failures}`);
   process.exit(failures === 0 ? 0 : 1);
 }

@@ -78,6 +78,24 @@
         останутся, доступ к ним даст повторный ввод фразы.
       </p>
     </section>
+
+    <!-- Статистика: видна ВСЕГДА (даже без фразы/конфига) — счётчики
+         локальные, кэш обновляет content при каждом sync (v0.2.2) -->
+    <section id="stats-block" class="card">
+      <h2>Статистика</h2>
+      <dl>
+        <dt>✅ Прочитано</dt>
+        <dd id="stat-read">—</dd>
+        <dt>❌ Пропущено</dt>
+        <dd id="stat-skip">—</dd>
+        <dt>Всего отмечено</dt>
+        <dd id="stat-total">—</dd>
+      </dl>
+      <p class="muted">
+        Счётчики считаются из отметок в этом браузере и обновляются при
+        посещении author.today. Фраза и конфиг для них не нужны.
+      </p>
+    </section>
   </main>
   <script type="module" src="options.js"></script>
 </body>
