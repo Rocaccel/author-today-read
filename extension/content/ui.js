@@ -102,6 +102,12 @@
       '.atr-controls[data-atr-wid="' + String(workId) + '"]'
     );
     nodes.forEach(render);
+    // v0.2.5: если включён тумблер «Скрыть отмечённые» — обновить скрытие
+    // строки этой книги (клик, pull из облака, импорт, GC — везде, где
+    // нет полного scan). ATR.dom появляется позже ui.js — доступ через guard.
+    if (ATR.dom && typeof ATR.dom.applyHideFilter === 'function') {
+      ATR.dom.applyHideFilter(workId);
+    }
   }
 
   ATR.ui = { create, render, renderAll };

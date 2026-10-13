@@ -73,6 +73,15 @@ Chrome-расширение (Manifest V3) для сайта <https://author.toda
 все остальные страницы сайта (главная, библиотека, страница автора, выпадающий
 поиск в шапке). Не расширять область без отдельного запроса пользователя.
 
+**Исключение — скрытие отмечённых (v0.2.5):** тумблер «Скрыть отмечённые»
+(`.atr-hide-toggle`) живёт в шапке списка (`.panel-actions`, §2.6) и
+появляется только там, где есть view-контролы (каталог/поиск с переключателем
+вида); **в tile-виде тумблер скрывается**, но **область скрытия шире области
+панелей**: при включённом pref карточки `.bookcard` привязываются к workId
+(по ссылке `/work/NNN`, атрибут `data-atr-row`) и отмеченные скрываются
+классом `.atr-marked` — панели `[+][−]` в плитку по-прежнему НЕ ставятся.
+Состояние тумблера — отдельный ключ localStorage `atr.ui.hideMarked` (§3.1).
+
 ---
 
 ## 2. DOM-карта author.today (проверено вживую 10.10.2026)
@@ -175,6 +184,49 @@ URL: `https://author.today/work/233831` — одиночная карточка 
 `.book-meta-panel > h1.book-title .atr-controls` (см. `styles.css`): кегль
 кнопок/индикатора остаётся 13px, `margin-left: 10px`.
 
+### 2.6. Шапка списка: переключатель вида и тумблер (проверено вживую 13.10.2026)
+
+Шапка `#search-results` (и каталога, и поиска) — общий якорь для тумблера
+v0.2.5 — `.panel-actions`:
+
+**Каталог** `/work/genre/...` — client-side Knockout, три кнопки (§2.4.2),
+активная имеет класс `active`:
+
+```html
+<div class="clearfix">
+  <h1 class="panel-title pull-left">Книги в жанре Фэнтези</h1>
+  <div class="panel-actions pull-right">
+    <button data-bind="click: switchView.bind($data, 'list')" class="btn btn-only-icon mr-sm btn-default active"><i class="icon-list"></i></button>
+    <button data-bind="click: switchView.bind($data, 'tile')"  class="btn btn-only-icon mr-sm btn-only-brd"><i class="icon-grid"></i></button>
+    <button data-bind="click: switchView.bind($data, 'table')" class="btn btn-only-icon btn-only-brd"><i class="icon-bars"></i></button>
+  </div>
+</div>
+```
+
+**Поиск** `/search?category=works` — те же три вида, но НЕ кнопки, а
+pjax-ссылки в своём `.panel-actions` (внутри `.panel-heading`):
+
+```html
+<div class="panel-heading">
+  <span>Поиск произведений</span>
+  <div class="panel-actions" data-pjax="">
+    <a href="/search?category=works&q=...&view=list"  class="btn btn-only-icon btn-default mr-sm active" rel="nofollow">…</a>
+    <a href="/search?category=works&q=...&view=table" class="btn btn-only-icon btn-default mr-sm" rel="nofollow">…</a>
+    <a href="/search?category=works&q=...&view=tile"  class="btn btn-only-icon btn-default" rel="nofollow">…</a>
+  </div>
+</div>
+```
+
+Правила для тумблера (v0.2.5, content/dom.js):
+- **якорь** — `.panel-actions` (единственная точка, общая для обоих вариантов);
+- **guard** — на странице есть view-контролы:
+  `[data-bind*="switchView"]` **или** `a[href*="view="]`; без них (главная,
+  страница книги, `/search` без категории) тумблер не рисуется;
+- **tile-вид** — активна KO-кнопка с `'tile'` в `data-bind` либо активная
+  ссылка `view=tile` → тумблер получает `hidden` (скрытие при этом работает);
+- `/search` без `category` (сетка без переключателя) и главная — guard не
+  проходит, тумблера нет.
+
 ---
 
 ## 3. Спецификация хранения (v0.2.0: схема v2)
@@ -207,6 +259,11 @@ URL: `https://author.today/work/233831` — одиночная карточка 
 - Повреждённый JSON — не ронять: считать пустым объектом и залогировать в консоль.
 - Кросс-табная синхронизация: событие `storage` (window) → перерисовка панелей
   (подписка в content/dom.js).
+- **`atr.ui.hideMarked`** (v0.2.5): `'1'` — включён тумблер «Скрыть
+  отмечённые», ключ отсутствует — выключен (дефолт). Отдельный
+  UI-preference ключ страницы (НЕ отметки): читает/пишет только content
+  (dom.js), новый независимый ключ — миграция не нужна; межвкладочная
+  синхронизация — нативное событие `storage` (ветка этого ключа в dom.js).
 
 ### 3.2. Миграция v1 → v2
 
@@ -255,10 +312,11 @@ author-today-read/
     ├── content/
     │   ├── storage.js           ← модуль хранения (localStorage, схема v2 + миграция + mergeRemote)
     │   ├── sync.js              ← синхронизация: content ↔ background через chrome.runtime
-    │   ├── ui.js                ← создание/обновление панели [+] [индикатор] [−]
-    │   ├── dom.js               ← сканирование DOM, вставка, MutationObserver, pjax
-    │   ├── main.js              ← точка входа (sync.init + dom.start)
-    │   └── styles.css           ← стили панели (light + dark)
+│   ├── ui.js                ← создание/обновление панели [+] [индикатор] [−]
+│   ├── dom.js               ← сканирование DOM, вставка, MutationObserver, pjax,
+│   │                           тумблер «Скрыть отмечённые» (v0.2.5)
+│   ├── main.js              ← точка входа (sync.init + dom.start)
+│   └── styles.css           ← стили панели и тумблера (light + dark)
     ├── shared/
     │   ├── phrase.js            ← ES-модуль: кодовая фраза, userId, PBKDF2/AES-GCM (options + background)
     │   └── backup.js            ← ES-модуль: экспорт/импорт отметок в JSON (v0.2.4, только options)
@@ -383,7 +441,7 @@ content-вкладку от options-страницы.
 | ------------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
 | `create(workId)`    | `(string) → HTMLElement` | возвращает `<span class="atr-controls" data-atr-wid="ID">` с кнопками `[+] [span.atr-status] [−]` и навешенными обработчиками |
 | `render(root)`      | `(HTMLElement) → void`   | читает отметку и обновляет текст индикатора/классы кнопок у конкретной панели                                                 |
-| `renderAll(workId)` | `(string) → void`        | обновляет все панели этого workId (на странице может быть одна, но перестраховка)                                             |
+| `renderAll(workId)` | `(string) → void`        | обновляет все панели этого workId (на странице может быть одна, но перестраховка) **+** вызов `ATR.dom.applyHideFilter(workId)` с guard — пересчёт скрытия строки при включённом тумблере (v0.2.5; путь клика/pull/импорта/GC, где нет полного `scan`) |
 
 Поведение кнопок: `click → event.preventDefault(); event.stopPropagation(); →
 ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обязателен —
@@ -397,21 +455,27 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 | `isBookPage()`         | `true`, если `location.pathname` матчится с `/^\/work\/(\d+)$/` (одиночная страница книги, §2.5)                                                                                                         |
 | `findWorkLink(target)` | ищет внутри `target` ссылку на книгу (`/work/(\d+)`, умеет абсолютные URL); возвращает `{ link, workId }` или null                                                                                       |
 | `findTargets()`        | `NodeList` точек вставки: `.book-row .book-title` (только элементы-строки!) и `table.books-table tbody td:first-child`                                                                                   |
-| `inject(target)`       | идемпотентно: если внутри уже есть `[data-atr-wid]` — выйти; иначе создать панель (`ATR.ui.create`) и вставить **сразу после ссылки на книгу**; после вставить `ATR.ui.render`                           |
+| `inject(target)`       | идемпотентно: если внутри уже есть `[data-atr-wid]` — выйти; иначе создать панель (`ATR.ui.create`) и вставить **сразу после ссылки на книгу**; после вставить `ATR.ui.render`; строка (`.book-row`/`tr`) дополнительно получает атрибут `data-atr-row="wid"` — точку скрытия (v0.2.5) |
 | `injectBookPage()`     | страница книги (§2.5): `workId` из `location.pathname`; идемпотентно (проверка `[data-atr-wid]` **внутри h1**) иначе `ATR.ui.create` → `h1.append(panel)` → `ATR.ui.render`; если `h1` не найден — выйти |
-| `scan()`               | полный проход: `findTargets()` + `inject()` **плюс** `injectBookPage()`; главный вход                                                                                                                    |
-| `start()`              | первичный `scan()` + `MutationObserver` на `document.body` (childList, subtree) с debounce ~150 мс + слушатели `'pjax:end'`, `'pjax:success'` (document), `'atr:changed'` (document), `'atr:gc'` (document, v0.2.1 — перерисовка после GC), `storage` (window) |
+| `isPrefOn()`           | `() → boolean` — включён ли pref `atr.ui.hideMarked` в localStorage страницы (v0.2.5, §3.1) |
+| `hasViewControls()`    | `() → boolean` — на странице есть view-контролы (`.panel-actions` + KO-кнопки/pjax-ссылки, §2.6); guard для тумблера |
+| `isTileView()`         | `() → boolean` — текущий вид «плитка» (активная KO-кнопка `'tile'` либо активная ссылка `view=tile`) |
+| `injectHideToggle()`   | идемпотентная вставка `<button class="atr-hide-toggle" data-atr-toggle>` в `.panel-actions`; клик → `togglePref()` (переключение pref + мгновенный `applyHideFilter`); в tile-виде получает `hidden` |
+| `tagTileCards()`       | тегирует карточки `.bookcard` атрибутом `data-atr-row="wid"` (wid из ссылки `/work/NNN`) — без панелей, только для скрытия (v0.2.5) |
+| `applyHideFilter(wid?)`| pref включён → строки/карточки с активной отметкой получают класс `.atr-marked` (`display:none`); выключен → класс снят везде; аргумент `wid` ограничивает проход одной книгой (точечный вызов из `ui.renderAll`) |
+| `scan()`               | полный проход: `injectHideToggle()` → `findTargets()` + `inject()` **плюс** `injectBookPage()` → `tagTileCards()` → `applyHideFilter()`; главный вход |
+| `start()`              | первичный `scan()` + `MutationObserver` на `document.body` (childList, subtree) с debounce ~150 мс + слушатели `'pjax:end'`, `'pjax:success'` (document), `'atr:changed'` (document), `'atr:gc'` (document, v0.2.1 — перерисовка после GC), `storage` (window: ветка `atr.v2.marks`/`null` → `renderExisting()` + `applyHideFilter()`; ветка `atr.ui.hideMarked` → обновление тумблера + `applyHideFilter()`, v0.2.5) |
 
 Идемпотентность — ключевое: повторные `scan()` **не должны дублировать** панели
 (проверка `target.querySelector('[data-atr-wid]')`).
 
-### 4.3. Структура manifest.json (v0.2.4)
+### 4.3. Структура manifest.json (v0.2.5)
 
 ```json
 {
   "manifest_version": 3,
   "name": "Author.Today — отметки книг",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Отметки ✅/❌ рядом с названиями книг в списках, таблицах и на странице книги. Синхронизация между устройствами через Firebase по кодовой фразе.",
   "icons": {
     "16": "icons/icon-16.png",
@@ -462,6 +526,16 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
   `@media (prefers-color-scheme: dark)` внутри `html:not(.dark)` не нужен —
   достаточно веток `.dark`.
 - Эмодзи индикатора рисуем текстом (`textContent = '✅'`), не картинками.
+- **Тумблер «Скрыть отмечённые» (v0.2.5)** — `<button type="button"
+  class="atr-hide-toggle" data-atr-toggle aria-pressed>` в `.panel-actions`
+  шапки списка: текст-переключатель «Скрыть отмечённые» ⇄ «Показать все»,
+  своё правило в `styles.css` (не зависимо от классов сайта; светлая тема —
+  серый баттон, тёмная — `html.dark .atr-hide-toggle`, активное состояние
+  `aria-pressed="true"` — акцентный зелёный `#2E9E5F`, тот же что у иконки
+  расширения); `title` по состоянию; в tile-виде — атрибут `hidden`
+  (+ страховка `.atr-hide-toggle[hidden]{display:none!important}`).
+- **Скрытие**: класс `.atr-marked` на строке/карточке при включённом pref →
+  `display:none !important` (одно правило для list/table/tile).
 
 ---
 
@@ -473,8 +547,9 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
    кнопок (§1.1), схему хранилища v2 и миграцию v1→v2, LWW-слияние с томбстоунами,
    страницу книги (панель внутри `h1.book-title`), генерацию/валидацию фразы,
    детерминированный userId, round-trip AES-GCM (чужой ключ падает), sync-протокол
-   content↔background (chrome-стаб). Все проверки должны быть `ok`, итог
-   «ВСЕ ТЕСТЫ ПРОЙДЕНЫ».
+   content↔background (chrome-стаб), ретраи и GC (секции [12]–[13]), статистику
+   ([14]), бэкап JSON ([15]), тумблер «Скрыть отмечённые» ([16], v0.2.5).
+   Все проверки должны быть `ok`, итог «ВСЕ ТЕСТЫ ПРОЙДЕНЫ».
 1. `chrome://extensions` → режим разработчика → «Загрузить распакованное
    расширение» → папка `extension/`. Без ошибок в manifest.
 2. Открыть `https://author.today/work/genre/fantasy` (вид «строки» по умолчанию):
@@ -535,6 +610,15 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
     открыть сайт → отметки на месте (новее файла не затёрты), ушёл push;
     битый/чужой файл → понятная ошибка, ничего не меняется. Автотесты —
     секция [15].
+23. **Тумблер «Скрыть отмечённые» (v0.2.5)**: в шапке списка рядом с
+    переключателем вида кнопка «Скрыть отмечённые» (в списке и таблице; на
+    странице книги/главной/без переключателя — нет); клик → отмеченные
+    строки/карточки исчезают, текст становится «Показать все», состояние
+    помнится после перезагрузки (`localStorage` `atr.ui.hideMarked`) и
+    общее для вкладок; снятие отметки возвращает строку; переключение на
+    плитку → кнопка исчезает, но отмеченные карточки остаются скрытыми;
+    повторный клик → всё показывается, ключ удаляется. Автотесты —
+    секция [16].
 
 ---
 

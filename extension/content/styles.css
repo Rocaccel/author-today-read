@@ -109,3 +109,75 @@ html.dark .atr-btn.atr-minus.atr-active {
   background: #462022;
   color: #ef5350;
 }
+
+/* --- Тумблер «Скрыть отмечённые» (v0.2.5) --- *
+ * Кнопка живёт в шапке списка (.panel-actions сайта), рядом с переключателем
+ * вида list/table/tile; свои стили, без зависимости от классов сайта. */
+.atr-hide-toggle {
+  display: inline-block;
+  padding: 4px 10px;
+  border: 1px solid #cfd8dc;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #546e7a;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.atr-hide-toggle:hover {
+  border-color: #90a4ae;
+  color: #37474f;
+}
+
+.atr-hide-toggle:focus-visible {
+  outline: 2px solid #4582af; /* фирменный синий сайта */
+  outline-offset: 1px;
+}
+
+/* Включён: акцентный зелёный (тот же, что у иконки расширения). */
+.atr-hide-toggle[aria-pressed="true"] {
+  border-color: #2e9e5f;
+  background: #2e9e5f;
+  color: #ffffff;
+}
+
+.atr-hide-toggle[aria-pressed="true"]:hover {
+  background: #268a51;
+  color: #ffffff;
+}
+
+/* В tile-виде тумблер скрыт (нативный атрибут hidden + страховка от display). */
+.atr-hide-toggle[hidden] {
+  display: none !important;
+}
+
+/* Строка/карточка с активной отметкой при включённом тумблере. */
+.atr-marked {
+  display: none !important;
+}
+
+/* Тёмная тема сайта (класс на <html>). */
+html.dark .atr-hide-toggle {
+  border-color: #455a64;
+  background: #2f3b47;
+  color: #b0bec5;
+}
+
+html.dark .atr-hide-toggle:hover {
+  border-color: #78909c;
+  color: #eceff1;
+}
+
+html.dark .atr-hide-toggle[aria-pressed="true"] {
+  border-color: #2e9e5f;
+  background: #1b3d22;
+  color: #66bb6a;
+}
+
+html.dark .atr-hide-toggle[aria-pressed="true"]:hover {
+  background: #268a51;
+  color: #a5d6a7;
+}

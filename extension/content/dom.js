@@ -11,7 +11,8 @@
  *
  * Область применения (AGENTS.md §1.2): только /search*, /work* (строки/таблица)
  * и одиночная страница книги /work/NNN (панель внутри h1.book-title).
- * Плитка .bookcard сознательно не трогаем.
+ * Панели в плитку .bookcard не ставим; в плитке работает только скрытие
+ * отмечённых по тумблеру (v0.2.5) — без панелей, по атрибуту строки.
  */
 (function () {
   'use strict';
@@ -88,6 +89,7 @@
     const existing = target.querySelector('[data-atr-wid]');
     if (existing) {
       ATR.ui.render(existing);
+      tagRow(target, existing.dataset.atrWid);
       return;
     }
     const found = findWorkLink(target);
@@ -96,6 +98,7 @@
     const panel = ATR.ui.create(found.workId);
     found.link.after(panel); // рядом с названием, внутри .book-title / <td>
     ATR.ui.render(panel);
+    tagRow(target, found.workId); // строка получает точку скрытия (v0.2.5)
   }
 
   /**
@@ -120,11 +123,128 @@
     ATR.ui.render(panel);
   }
 
+  // --- Тумблер «Скрыть отмечённые» (v0.2.5, AGENTS.md §1.2/§3.1) ---
+  //
+  // Состояние — отдельный ключ localStorage страницы (общий для вкладок,
+  // межвкладочная синхронизация через нативное событие `storage`).
+  // Новый независимый UI-ключ: миграция не нужна, по умолчанию выключен.
+
+  const KEY_PREF = 'atr.ui.hideMarked';
+  const PREF_ON = '1';
+  const TXT_HIDE = 'Скрыть отмечённые';
+  const TXT_SHOW = 'Показать все';
+
+  /** Тумблер включён? */
+  function isPrefOn() {
+    return localStorage.getItem(KEY_PREF) === PREF_ON;
+  }
+
+  /**
+   * На странице есть переключатель вида list/table/tile?
+   * Каталог — KO-кнопки `switchView` (§2.4.2), поиск — pjax-ссылки `?view=`
+   * (§2.3): оба живут в `.panel-actions`. Тумблер имеет смысл только там,
+   * где вообще есть список/таблица; иначе (главная, страница книги,
+   * /search без категории) — не рисуем.
+   */
+  function hasViewControls() {
+    const pa = document.querySelector('.panel-actions');
+    if (!pa) return false;
+    return !!pa.querySelector('[data-bind*="switchView"], a[href*="view="]');
+  }
+
+  /** Текущий вид — плитка? (активная KO-кнопка либо активная pjax-ссылка). */
+  function isTileView() {
+    const ko = document.querySelector('[data-bind*="switchView"][class~="active"]');
+    if (ko) return (ko.getAttribute('data-bind') || '').includes('tile');
+    const link = document.querySelector('.panel-actions a[href*="view="][class~="active"]');
+    if (link) return (link.getAttribute('href') || '').includes('view=tile');
+    return false;
+  }
+
+  /** Обновляет состояние тумблера: текст, aria-pressed, видимость (в tile скрыт). */
+  function updateToggle(btn) {
+    const on = isPrefOn();
+    // textContent менять только при реальном отличии — иначе MutationObserver
+    // увидит замену текстового узла и пойдёт по кругу (скан → textContent → скан).
+    const text = on ? TXT_SHOW : TXT_HIDE;
+    if (btn.textContent !== text) btn.textContent = text;
+    btn.setAttribute('aria-pressed', String(on));
+    btn.title = on ? 'Показать отмечённые книги' : 'Скрывать отмечённые книги';
+    // В tile-виде тумблер не показываем (скрытие при этом продолжает работать).
+    btn.hidden = isTileView();
+  }
+
+  /** Переключает pref и сразу пересчитывает скрытие. */
+  function togglePref() {
+    if (isPrefOn()) localStorage.removeItem(KEY_PREF);
+    else localStorage.setItem(KEY_PREF, PREF_ON);
+    const btn = document.querySelector('[data-atr-toggle]');
+    if (btn) updateToggle(btn);
+    applyHideFilter();
+  }
+
+  /** Идемпотентная вставка тумблера в шапку списка (.panel-actions). */
+  function injectHideToggle() {
+    if (!hasViewControls()) return;
+    const pa = document.querySelector('.panel-actions');
+    const existing = pa.querySelector('[data-atr-toggle]');
+    if (existing) {
+      updateToggle(existing);
+      return;
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'atr-hide-toggle';
+    btn.dataset.atrToggle = '1'; // маркер идемпотентности (data-atr-toggle)
+    btn.addEventListener('click', togglePref);
+    pa.append(btn);
+    updateToggle(btn);
+  }
+
+  /**
+   * Ставит атрибут data-atr-row="wid" на строку списка/таблицы —
+   * точку применения скрытия. Вызывается из inject() при вставке панели.
+   */
+  function tagRow(target, wid) {
+    const row = target.closest('.book-row') || target.closest('tr');
+    if (row) row.dataset.atrRow = String(wid);
+  }
+
+  /**
+   * Тегирует карточки плитки .bookcard (wid — из ссылки /work/NNN).
+   * Панели в плитку НЕ ставим (§1.2) — только невидимый атрибут для скрытия.
+   */
+  function tagTileCards() {
+    document.querySelectorAll('.bookcard').forEach((card) => {
+      if (card.dataset.atrRow) return;
+      const found = findWorkLink(card);
+      if (found) card.dataset.atrRow = found.workId;
+    });
+  }
+
+  /**
+   * Применяет скрытие: pref включён → строки с активной отметкой получают
+   * класс `.atr-marked` (display:none, styles.css); pref выключен → класс
+   * снимается. Опциональный wid ограничивает проход одной книгой
+   * (быстрый путь из ui.renderAll при клике/pull/GC).
+   */
+  function applyHideFilter(wid) {
+    const on = isPrefOn();
+    const limit = wid === undefined ? null : String(wid);
+    document.querySelectorAll('[data-atr-row]').forEach((row) => {
+      if (limit !== null && row.dataset.atrRow !== limit) return;
+      row.classList.toggle('atr-marked', on && ATR.storage.get(row.dataset.atrRow) !== null);
+    });
+  }
+
   /** Полный проход по странице. Главная точка входа, безопасна для повторов. */
   function scan() {
     if (!isEnabledPage()) return;
+    injectHideToggle();
     for (const target of findTargets()) inject(target);
     injectBookPage();
+    tagTileCards();
+    applyHideFilter();
   }
 
   // --- Debounce: наблюдатель срабатывает пачками, сканируем один раз за паузу ---
@@ -177,10 +297,24 @@
     });
 
     // 4) Изменение отметки в ДРУГОЙ вкладке: нативное событие `storage`.
+    //    Также сюда же приходит смена pref «Скрыть отмечённые» (v0.2.5) —
+    //    он лежит в localStorage страницы, событие летит в остальные вкладки.
     window.addEventListener('storage', (e) => {
-      if (e.key === null || e.key === ATR.storage.KEY_V2) renderExisting();
+      if (e.key === null || e.key === ATR.storage.KEY_V2) {
+        renderExisting();
+        applyHideFilter(); // отметка могла прийти/уйти из другой вкладки
+      } else if (e.key === KEY_PREF) {
+        const btn = document.querySelector('[data-atr-toggle]');
+        if (btn) updateToggle(btn);
+        applyHideFilter();
+      }
     });
   }
 
-  ATR.dom = { isEnabledPage, isBookPage, findWorkLink, findTargets, inject, injectBookPage, scan, start };
+  ATR.dom = {
+    isEnabledPage, isBookPage, findWorkLink, findTargets, inject, injectBookPage,
+    scan, start,
+    // v0.2.5 — тумблер «Скрыть отмечённые»:
+    isPrefOn, hasViewControls, isTileView, injectHideToggle, tagTileCards, applyHideFilter
+  };
 })();

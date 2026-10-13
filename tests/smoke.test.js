@@ -23,6 +23,15 @@ const read = (p) => fs.readFileSync(path.join(EXT, p), 'utf8');
 
 const HTML = `<!DOCTYPE html><html><body>
 <div id="pjax-container">
+  <!-- шапка панели каталога: заголовок + переключатель вида (KO-кнопки) -->
+  <div class="clearfix">
+    <h1 class="panel-title pull-left">Книги в жанре Фэнтези</h1>
+    <div class="panel-actions pull-right">
+      <button data-bind="click: switchView.bind($data, 'list')" class="btn btn-only-icon mr-sm btn-default active"><i class="icon-list"></i></button>
+      <button data-bind="click: switchView.bind($data, 'tile')" class="btn btn-only-icon mr-sm btn-only-brd"><i class="icon-grid"></i></button>
+      <button data-bind="click: switchView.bind($data, 'table')" class="btn btn-only-icon btn-only-brd"><i class="icon-bars"></i></button>
+    </div>
+  </div>
   <!-- вид: строки -->
   <div class="book-row">
     <div class="book-cover-wrapper"></div>
@@ -608,6 +617,91 @@ async function main() {
   assert(removed15.filter((k) => k === 'atr.sync.pendingImport').length === 1, 'импорт: повторный вызов — no-op');
 
   delete globalThis.chrome;
+
+  console.log('\n[16] Тумблер «Скрыть отмечённые» (v0.2.5)');
+
+  const dom16 = new JSDOM(HTML, { url: 'https://author.today/work/genre/fantasy', runScripts: 'outside-only', pretendToBeVisual: true });
+  const w16 = dom16.window;
+  const d16 = w16.document;
+  for (const f of ['content/storage.js', 'content/ui.js', 'content/dom.js', 'content/main.js']) {
+    w16.eval(read(f));
+  }
+  await sleep(50);
+
+  const tog16 = d16.querySelector('.panel-actions [data-atr-toggle]');
+  assert(tog16, 'тумблер вставлен в .panel-actions рядом с переключателем вида');
+  assert(d16.querySelectorAll('[data-atr-toggle]').length === 1, 'тумблер ровно один');
+  assert(
+    tog16.textContent === 'Скрыть отмечённые' && tog16.getAttribute('aria-pressed') === 'false',
+    'выключено: текст «Скрыть отмечённые», aria-pressed=false'
+  );
+  assert(tog16.hidden === false, 'в list-виде тумблер виден');
+  w16.ATR.dom.scan();
+  assert(d16.querySelectorAll('[data-atr-toggle]').length === 1, 'повторный scan() не дублирует тумблер');
+
+  const S16 = w16.ATR.storage;
+  const click16 = (el) => el.dispatchEvent(new w16.MouseEvent('click', { bubbles: true, cancelable: true }));
+  S16.toggle('659887', 'read');
+  S16.toggle('463277', 'skip');
+  S16.toggle('644707', 'read');
+  const rowList = d16.querySelector('.book-row[data-atr-row="659887"]');
+  const rowTable = d16.querySelector('tr[data-atr-row="463277"]');
+  const card16 = d16.querySelector('.bookcard[data-atr-row="644707"]');
+  assert(rowList && rowTable, 'строки списка и таблицы претеглены data-atr-row');
+  assert(card16, 'карточка плитки претеглена data-atr-row (без панели)');
+  assert(d16.querySelectorAll('.atr-marked').length === 0, 'pref выключен — ничего не скрыто');
+
+  click16(tog16);
+  assert(w16.localStorage.getItem('atr.ui.hideMarked') === '1', 'клик включил pref в localStorage');
+  assert(tog16.textContent === 'Показать все' && tog16.getAttribute('aria-pressed') === 'true', 'текст и aria-pressed переключились');
+  assert(rowList.classList.contains('atr-marked'), 'отмеченная строка списка скрыта');
+  assert(rowTable.classList.contains('atr-marked'), 'отмеченная строка таблицы скрыта');
+  assert(card16.classList.contains('atr-marked'), 'отмеченная карточка плитки скрыта (скрытие работает в tile)');
+
+  // Снятие/возврат отметки: путь atr:changed → ui.renderAll → applyHideFilter
+  S16.toggle('659887', 'read'); // read → снятие (томбстоун)
+  assert(!rowList.classList.contains('atr-marked'), 'снятие отметки возвращает строку (событие atr:changed)');
+  S16.toggle('659887', 'read'); // снова read
+  assert(rowList.classList.contains('atr-marked'), 'повторная отметка снова скрывает строку');
+
+  // Вид tile: тумблер скрывается, скрытие продолжает работать
+  const ko16 = d16.querySelectorAll('[data-bind*="switchView"]');
+  ko16[0].classList.remove('active');
+  ko16[1].classList.add('active');
+  w16.ATR.dom.scan();
+  assert(tog16.hidden === true, 'в tile-виде тумблер скрыт');
+  assert(card16.classList.contains('atr-marked'), 'в tile-виде скрытие по-прежнему работает');
+  ko16[1].classList.remove('active');
+  ko16[0].classList.add('active');
+  w16.ATR.dom.scan();
+  assert(tog16.hidden === false, 'возврат в list — тумблер снова виден');
+
+  click16(tog16);
+  assert(w16.localStorage.getItem('atr.ui.hideMarked') === null, 'повторный клик выключил pref (ключ удалён)');
+  assert(tog16.textContent === 'Скрыть отмечённые' && tog16.getAttribute('aria-pressed') === 'false', 'состояние кнопки вернулось');
+  assert(d16.querySelectorAll('.atr-marked').length === 0, 'pref выключен — все строки показаны');
+
+  // pref=1 до загрузки — строки скрыты сразу, тумблер сразу в состоянии «Показать все»
+  const dom17 = new JSDOM(HTML, { url: 'https://author.today/work/genre/fantasy', runScripts: 'outside-only', pretendToBeVisual: true });
+  const w17 = dom17.window;
+  w17.localStorage.setItem('atr.ui.hideMarked', '1');
+  w17.localStorage.setItem('atr.v2.marks', JSON.stringify({ '659887': { m: 'read', t: Date.now() } }));
+  for (const f of ['content/storage.js', 'content/ui.js', 'content/dom.js', 'content/main.js']) {
+    w17.eval(read(f));
+  }
+  await sleep(50);
+  const row17 = w17.document.querySelector('.book-row[data-atr-row="659887"]');
+  assert(row17 && row17.classList.contains('atr-marked'), 'pref=1 применяется сразу при загрузке страницы');
+  const tog17 = w17.document.querySelector('[data-atr-toggle]');
+  assert(tog17 && tog17.textContent === 'Показать все', 'тумблер сразу в состоянии «Показать все»');
+
+  // Страница книги: view-контролов нет — тумблер не появляется
+  const dom18 = new JSDOM(BOOK_HTML, { url: 'https://author.today/work/233831', runScripts: 'outside-only', pretendToBeVisual: true });
+  for (const f of ['content/storage.js', 'content/ui.js', 'content/dom.js', 'content/main.js']) {
+    dom18.window.eval(read(f));
+  }
+  await sleep(50);
+  assert(dom18.window.document.querySelectorAll('[data-atr-toggle]').length === 0, 'на странице книги тумблера нет (нет view-контролов)');
 
   console.log(failures === 0 ? '\nВСЕ ТЕСТЫ ПРОЙДЕНЫ' : `\nПРОВАЛОВ: ${failures}`);
   process.exit(failures === 0 ? 0 : 1);

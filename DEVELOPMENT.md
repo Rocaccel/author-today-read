@@ -18,7 +18,7 @@ extension/             ← грузится в Chrome как распакова�
   content/storage.js      хранение в localStorage, схема v2 + миграция
   content/sync.js         синхронизация с Firebase (content ↔ background)
   content/ui.js           панель [+] [индикатор] [−]
-  content/dom.js          вставка в DOM + MutationObserver/pjax
+  content/dom.js          вставка в DOM + MutationObserver/pjax + тумблер «Скрыть отмечённые» (v0.2.5)
   content/main.js         точка входа
   content/styles.css      стили (light/dark)
   shared/phrase.js        кодовая фраза, userId, PBKDF2/AES-GCM
@@ -44,7 +44,8 @@ npm test
 кнопок, схему хранилища v2 и миграцию с v1, LWW-слияние с томбстоунами,
 панель на странице книги, генерацию фразы, детерминированный userId,
 шифрование AES-GCM (чужой ключ падает), протокол синхронизации
-content ↔ background.
+content ↔ background, ретраи/GC, статистику, бэкап JSON и тумблер
+«Скрыть отмечённые» (секции [11]–[16]).
 
 ## Настройка синхронизации из исходников
 
