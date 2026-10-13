@@ -6,3 +6,6 @@ dist/
 # Секреты/конфиг Firebase — НИКОГДА не коммитить
 .env
 extension/background/config.json
+
+# Отчёты замера производительности (генерируются scripts/perf.js)
+perf/

@@ -11,6 +11,7 @@ README.md              пользовательская инструкция
 .env                   конфиг Firebase (GITIGNORE, заполняется данными Firebase)
 package.json           тесты + npm run config
 scripts/apply-config.js  .env → extension/background/config.json
+scripts/perf.js          A/B-замер влияния расширения на скорость (npm run perf)
 tests/                 автотесты jsdom
 extension/             ← грузится в Chrome как распакованное расширение
   manifest.json           MV3 (permissions: storage; options_ui; icons/action; host: rtdb)
@@ -46,6 +47,34 @@ npm test
 шифрование AES-GCM (чужой ключ падает), протокол синхронизации
 content ↔ background, ретраи/GC, статистику, бэкап JSON и тумблер
 «Скрыть отмечённые» (секции [11]–[16]).
+
+## Замер производительности (регулярно)
+
+A/B-тест «влияет ли расширение на скорость страницы» — `scripts/perf.js`
+(zero-dep: Node >= 22 + portable Chromium/Chrome):
+
+```
+npm run perf              # 5 прогонов × 2 URL → таблица + perf/last-report.md
+npm run perf -- --quick   # быстрый путь: 3 прогона, только каталог
+npm run perf -- --runs=10 # стабильнее медиана
+```
+
+Что делает: два запуска браузера (с `--load-extension` и без), холодные
+навигации на `/work/genre/fantasy` и `/search?category=works` с отключённым
+кэшем, сбор FCP/LCP/CLS/TTFB/DCL/load/long-tasks/CDP-длительностей,
+медианы и дельты «с расширением − без». Дополнительно меряет изолированную
+стоимость нашего кода (eval 5 content-файлов + холодный/tёплый `scan()`
+в мс). Sanity-проверка: в конфиге «с расширением» на каталоге обязаны
+появиться `.atr-controls` (иначе — автоповтор в оконном режиме, exit 2).
+
+Результаты: `perf/last-report.md` (перезапись) и строка в `perf/history.md`
+(история прогонов по коммитам — удобно ловить деградации между версиями).
+Каталог `perf/` в `.gitignore`.
+
+Интерпретация: расширение грузится на `document_idle` — FCP/LCP в пределах
+шума сети это норма; смотреть на дельту **CLS** (инжект панелей сдвигает
+текст после load) и **TaskDuration/ScriptDuration** (работа главного
+потока). Разброс велик → `--runs=10`.
 
 ## Настройка синхронизации из исходников
 

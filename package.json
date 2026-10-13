@@ -5,7 +5,8 @@
   "description": "Тесты расширения «Author.Today — отметки книг». Само расширение от npm не зависит — см. AGENTS.md.",
   "scripts": {
     "test": "node tests/smoke.test.js",
-    "config": "node scripts/apply-config.js"
+    "config": "node scripts/apply-config.js",
+    "perf": "node scripts/perf.js"
   },
   "devDependencies": {
     "jsdom": "^24.0.0"

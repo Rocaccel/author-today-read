@@ -303,7 +303,8 @@ author-today-read/
 ├── .env                         ← конфиг Firebase (GITIGNORE, заполняет пользователь)
 ├── package.json                 ← тесты + `npm run config` (jsdom devDependency)
 ├── scripts/
-│   └── apply-config.js          ← .env → extension/background/config.json (npm run config)
+│   ├── apply-config.js          ← .env → extension/background/config.json (npm run config)
+│   └── perf.js                  ← A/B-замер влияния расширения на скорость страницы (npm run perf)
 ├── tests/
 │   └── smoke.test.js            ← автотесты jsdom (инжект, семантика, v2, LWW, фраза, крипто, sync)
 └── extension/                   ← содержимое расширения (грузится в Chrome)
