@@ -31,7 +31,9 @@ Chrome-расширение (Manifest V3) для сайта <https://author.toda
    в `chrome.storage.local` лежат лишь кодовая фраза и статусы синхронизации
    (страница author.today их не читает).
 3. Popup у расширения **не нужен** — индикаторы на страницах + options-страница
-   (настройки/фраза/статус, §8.5).
+   (настройки/фраза/статус, §8.5). Иконка в тулбаре есть (v0.2.3): тоже без
+   попапа — клик по ней открывает Параметры (`chrome.action.onClicked` →
+   `openOptionsPage`, §4.3).
 4. Firebase — **реальный REST-клиент** (`background/firebase.js`, v0.2.0);
    конфиг подставляется из `.env` → `npm run config` (файлы в .gitignore,
    секретов в репо нет).
@@ -244,7 +246,8 @@ author-today-read/
 ├── tests/
 │   └── smoke.test.js            ← автотесты jsdom (инжект, семантика, v2, LWW, фраза, крипто, sync)
 └── extension/                   ← содержимое расширения (грузится в Chrome)
-    ├── manifest.json            ← MV3: permissions storage, host_permissions rtdb, options_ui
+    ├── manifest.json            ← MV3: permissions storage, host_permissions rtdb, options_ui, icons/action
+    ├── icons/                   ← PNG 16/32/48/128 (v0.2.3, бинарные ассеты — §7)
     ├── content/
     │   ├── storage.js           ← модуль хранения (localStorage, схема v2 + миграция + mergeRemote)
     │   ├── sync.js              ← синхронизация: content ↔ background через chrome.runtime
@@ -259,7 +262,7 @@ author-today-read/
     │   ├── options.js           ← генерация/ввод фразы, статус, ручная синхронизация, выход
     │   └── options.css
     └── background/
-        ├── service-worker.js    ← ES-модуль: роутер сообщений + хранилище фразы + кэш статистики
+        ├── service-worker.js    ← ES-модуль: роутер сообщений + хранилище фразы + кэш статистики + action-клик
         ├── firebase.js          ← Realtime Database REST-клиент (GET/PATCH .json + sync)
         └── config.json          ← ГЕНЕРИРУЕТСЯ из .env (GITIGNORE, в свежем клоне отсутствует)
 ```
@@ -388,14 +391,24 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 Идемпотентность — ключевое: повторные `scan()` **не должны дублировать** панели
 (проверка `target.querySelector('[data-atr-wid]')`).
 
-### 4.3. Структура manifest.json (v0.2.2)
+### 4.3. Структура manifest.json (v0.2.3)
 
 ```json
 {
   "manifest_version": 3,
   "name": "Author.Today — отметки книг",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Отметки ✅/❌ рядом с названиями книг в списках, таблицах и на странице книги. Синхронизация между устройствами через Firebase по кодовой фразе.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_icon": { "16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png" },
+    "default_title": "Author.Today — отметки книг (открыть параметры)"
+  },
   "permissions": ["storage"],
   "host_permissions": ["https://*.firebasedatabase.app/*"],
   "content_scripts": [
@@ -411,7 +424,12 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 }
 ```
 
-Иконки не обязательны — не генерировать, не добавлять (нет бинарных ассетов в репо).
+**Иконки (v0.2.3, добавлены по явному запросу пользователя):** PNG 16/32/48/128
+в `extension/icons/`, источник — SVG-мастер «книга с галочкой на зелёном тайле»
+(`#2E9E5F`, генерировался скиллом logo-design; мастер не в репо — при
+изменении цвета/формы спросить пользователя). `action` без попапа: клик →
+Параметры (`chrome.action.onClicked` в service-worker.js). Правило: эти бинарные
+ассеты не пересоздавать и не добавлять новые без запроса (§7).
 
 ---
 
@@ -493,6 +511,10 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
     фразы/конфига); после кликов на author.today счётчики ✅/❌ совпадают с
     отмеченными книгами; синк из options (свой `entries:{}`) счётчики НЕ
     обнуляет; без visited-сайта — нули (кэш пуст). Автотест — секция [14].
+21. **Иконки (v0.2.3)**: `extension/icons/` содержит 16/32/48/128; в
+    `chrome://extensions` расширение показывает зелёную книжку с галочкой
+    (видно и в тёмном тулбаре, 16 px читается); клик по иконке открывает
+    Параметры; манифест без ошибок (icons/action валидны).
 
 ---
 
@@ -519,6 +541,9 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 - **Секреты конфига**: `.env` и `extension/background/config.json` — в `.gitignore`,
   НИКОГДА не коммитить и не запушить (включая содержимое в других файлах).
   В репозитории допустимы только пустые заглушки и инструкции.
+- **Бинарные ассеты** (картинки/PNG/иконки) — только по явному запросу
+  пользователя. Уже добавлены: `extension/icons/*` (v0.2.3, запрос получен);
+  новые/пересозданные ассеты — только после нового запроса.
 
 ---
 

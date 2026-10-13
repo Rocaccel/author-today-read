@@ -178,3 +178,8 @@ chrome.runtime.onInstalled.addListener((details) => {
       'Отметки: localStorage (atr.v2.marks, кэш) + синхронизация через Firebase.'
   );
 });
+
+// Клик по иконке в тулбаре → открыть Параметры (без попапа, v0.2.3)
+chrome.action.onClicked.addListener(() => {
+  chrome.runtime.openOptionsPage();
+});

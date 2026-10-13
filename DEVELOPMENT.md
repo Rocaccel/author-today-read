@@ -13,7 +13,8 @@ package.json           тесты + npm run config
 scripts/apply-config.js  .env → extension/background/config.json
 tests/                 автотесты jsdom
 extension/             ← грузится в Chrome как распакованное расширение
-  manifest.json           MV3 (permissions: storage; options_ui; host: rtdb)
+  manifest.json           MV3 (permissions: storage; options_ui; icons/action; host: rtdb)
+  icons/                  PNG 16/32/48/128 (иконка тулбара, v0.2.3)
   content/storage.js      хранение в localStorage, схема v2 + миграция
   content/sync.js         синхронизация с Firebase (content ↔ background)
   content/ui.js           панель [+] [индикатор] [−]
@@ -21,8 +22,8 @@ extension/             ← грузится в Chrome как распакова�
   content/main.js         точка входа
   content/styles.css      стили (light/dark)
   shared/phrase.js        кодовая фраза, userId, PBKDF2/AES-GCM
-  options/                страница настроек (фраза, статус, синхронизация)
-  background/service-worker.js  роутер сообщений + хранилище фразы
+  options/                страница настроек (фраза, статус, синхронизация, статистика)
+  background/service-worker.js  роутер сообщений + хранилище фразы + кэш статистики
   background/firebase.js  Realtime Database REST-клиент (GET/PATCH/sync)
   background/config.json    ГЕНЕРИРУЕТСЯ из .env (GITIGNORE)
 ```

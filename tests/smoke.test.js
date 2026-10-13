@@ -463,9 +463,11 @@ async function main() {
     runtime: {
       onMessage: { addListener: (fn) => { swListener = fn; } },
       onInstalled: { addListener: () => {} },
+      openOptionsPage: () => {},
       // в тесте config.json не читается (fetch file:// отклоняется) → skip
       getURL: (p) => 'file:///' + p.replace(/\\/g, '/')
     },
+    action: { onClicked: { addListener: () => {} } },
     storage: {
       local: {
         get: async (keys) => {
