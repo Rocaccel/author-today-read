@@ -163,7 +163,8 @@ if (-not $Title) {
 
 git tag $tag main
 if ($LASTEXITCODE -ne 0) { Fail "git tag failed" }
-git push origin main $tag
+# явный refs/tags/: имя может совпадать с локальной веткой (v0.2.5 и т.п.)
+git push origin main "refs/tags/$tag"
 if ($LASTEXITCODE -ne 0) { Fail "git push failed" }
 Step "тег $tag запушен"
 
