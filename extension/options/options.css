@@ -186,6 +186,32 @@ dd {
   margin: 2px 0 0;
 }
 
+/* Блок «Статистика»: три счётчика колонками в ряд (подпись сверху,
+   число снизу); скоуп на #stats-block — второй <dl> («Синхронизация»)
+   остаётся вертикальным на глобальных dt/dd выше */
+#stats-block .stats-row {
+  display: flex;
+  flex-wrap: wrap; /* узкое окно → колонки переносятся */
+  gap: 8px 32px;
+  margin: 8px 0;
+}
+
+#stats-block .stat-cell {
+  display: flex;
+  flex-direction: column;
+}
+
+#stats-block dt {
+  margin-top: 0;
+}
+
+#stats-block dd {
+  margin: 2px 0 0;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
 /* Список устройств (v0.2.6, §8.9) */
 .device-row {
   display: flex;
