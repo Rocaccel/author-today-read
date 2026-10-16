@@ -69,7 +69,11 @@ function renderStatus(status) {
 
     let state = 'готово к работе';
     if (!status.configReady) state = 'конфиг не заполнен — только локально';
-    else if (status.lastSync) state = 'синхронизировано';
+    else if (status.lastSync) {
+      const read = status.stats?.read || 0;
+      const skip = status.stats?.skip || 0;
+      state = `синхронизировано ${read}✅ + ${skip}❌`;
+    }
     $('sync-state').textContent = state;
 
     const errBox = $('status-error');
