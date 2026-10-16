@@ -13,6 +13,12 @@
  *                     удаляется, потом сохраняется новая фраза
  *   atr:sync:sync     {entries} → полный round-trip с Realtime Database,
  *                     возврат pull
+ *   atr:data:wipe     → полное удаление данных (v0.2.6, §8.8)
+ *   atr:devices:list  → список устройств текущей фразы (v0.2.6, §8.9);
+ *                       увидев deleted:1 у СЕБЯ — тихий сброс + {reset:true}
+ *   atr:devices:rename {deviceId, name} → переименование устройства
+ *   atr:devices:remove {deviceId} → пометить чужое устройство удалённым
+ *                       (своё — отказ: удалить можно только другое)
  *
  * Фраза хранится ТОЛЬКО в chrome.storage.local (читает одно расширение,
  * страница author.today её не видит). В page localStorage не попадает.
@@ -29,6 +35,7 @@ const K_LAST_ERROR = 'atr.sync.lastError';
 const K_STATS = 'atr.sync.stats'; // {read, skip, total, at} — кэш счётчиков (v0.2.2)
 const K_SNAPSHOT = 'atr.sync.snapshot'; // {entries, at} — последний срез от content (v0.2.4, экспорт)
 const K_WIPE = 'atr.sync.wipePending'; // флаг полного вайпа (v0.2.6): content чистит localStorage
+const K_DEVICE = 'atr.sync.deviceId'; // id этого устройства (v0.2.6, §8.9): uuid, генерируется при первом sync
 
 /**
  * Счётчики из локального среза {wid: {m, t}} (v0.2.2).
@@ -73,19 +80,68 @@ async function getPhrase() {
 let opLabel = null;
 let activeSyncs = 0;
 
-/** Дождаться завершения sync, начатых до ротации (или timeout, мс). */
-async function waitForDrain(timeoutMs = 10000) {
+/**
+ * Дождаться завершения sync, начатых до ротации/вайпа (или timeout, мс).
+ * floor — НЕ ждать этот уровень активности: вызов из-под уже активного
+ * handleSync (тихий сброс) передаёт floor=1 — счётчик включает нас самих,
+ * ждать себя = гарантированный deadlock.
+ */
+async function waitForDrain(timeoutMs = 10000, floor = 0) {
   const started = Date.now();
-  while (activeSyncs > 0 && Date.now() - started < timeoutMs) {
+  while (activeSyncs > floor && Date.now() - started < timeoutMs) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  return activeSyncs === 0;
+  return activeSyncs <= floor;
 }
 
 /** Сохранённый userId (hex) или null. */
 async function getUserId() {
   const data = await chrome.storage.local.get(K_USER);
   return data[K_USER] || null;
+}
+
+// --- Устройства (v0.2.6, §8.9) ------------------------------------------------
+
+/** Новый deviceId: crypto.randomUUID, страховка — hex из 16 случайных байт. */
+function generateDeviceId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * deviceId этого браузера: создаётся при первом обращении и хранится в
+ * chrome.storage.local. Ключ УДАЛЯЕТСЯ при тихом сбросе/вайпе — следующий
+ * вход генерирует новый id, и «свой же» флаг deleted:1 больше не находится
+ * (иначе зацикливание).
+ */
+async function getDeviceId() {
+  const data = await chrome.storage.local.get(K_DEVICE);
+  if (data[K_DEVICE]) return data[K_DEVICE];
+  const id = generateDeviceId();
+  await chrome.storage.local.set({ [K_DEVICE]: id });
+  return id;
+}
+
+/** Человекочитаемое имя устройства из UA: «Chrome · Windows», «Firefox». */
+function deviceNameFromUA() {
+  const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+  let browser = 'Chromium';
+  if (/Edg\//.test(ua)) browser = 'Edge';
+  else if (/OPR\//.test(ua)) browser = 'Opera';
+  else if (/YaBrowser/.test(ua)) browser = 'Яндекс.Браузер';
+  else if (/Firefox\//.test(ua)) browser = 'Firefox';
+  else if (/Chrome\//.test(ua)) browser = 'Chrome';
+  let os = '';
+  if (/Windows NT/.test(ua)) os = 'Windows';
+  else if (/Android/.test(ua)) os = 'Android';
+  else if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
+  else if (/Mac OS X/.test(ua)) os = 'macOS';
+  else if (/Linux/.test(ua)) os = 'Linux';
+  return os ? `${browser} · ${os}` : browser;
 }
 
 async function setLastError(message) {
@@ -228,10 +284,12 @@ async function handleDataWipe() {
       cloudDeleted = true;
     }
 
-    // Локальные данные расширения, включая копии отметок (stats, snapshot)
-    // и отложенный импорт — иначе после вайпа «воскреснут» бы откуда-нибудь.
+    // Локальные данные расширения, включая копии отметок (stats, snapshot),
+    // отложенный импорт и deviceId (v0.2.6, §8.9 — следующий вход
+    // зарегистрирует новое устройство) — иначе после вайпа «воскреснут» бы.
     await chrome.storage.local.remove([
-      K_PHRASE, K_USER, K_LAST_SYNC, K_LAST_ERROR, K_STATS, K_SNAPSHOT, 'atr.sync.pendingImport'
+      K_PHRASE, K_USER, K_LAST_SYNC, K_LAST_ERROR, K_STATS, K_SNAPSHOT,
+      'atr.sync.pendingImport', K_DEVICE
     ]);
     // Флаг — последним: content в открытых вкладках чистит localStorage сразу,
     // при отсутствии вкладок — при следующем визите на author.today.
@@ -247,6 +305,217 @@ async function handleDataWipe() {
     return { ok: false, error: message };
   } finally {
     opLabel = null;
+  }
+}
+
+/**
+ * Тихий сброс (v0.2.6, §8.9): нас пометили `deleted: 1` в списке устройств
+ * — фраза/статусы снимаются, content по флагу стирает localStorage: состояние
+ * «как после установки». Облако отметок НЕ трогаем (оно общее, пометку ставил
+ * другой пользователь списка).
+ *
+ * Порядок: guard (`opLabel`) → drain чужих sync (floor — нас самих не ждём,
+ * когда вызов идёт из-под активного handleSync) → удаление 8 ключей
+ * (в т.ч. deviceId — новый вход зарегистририрует новое устройство, иначе
+ * снова бы находили свой же deleted:1) → флаг `wipePending` → best-effort
+ * DELETE своего узла devices (фраза ещё на руках).
+ *
+ * @param {Object|null} client — клиент firebase (самоочистка узла)
+ * @param {string} userId
+ * @param {string} deviceId — уходящий id (ключ K_DEVICE удаляется!)
+ * @param {number} floor — 0 (вызов вне sync) или 1 (мы сами = активный sync)
+ * @returns {Promise<boolean>} false — drain не дождался, НИЧЕГО не тронуто
+ */
+async function performRemoteReset(client, userId, deviceId, floor = 0) {
+  const prevLabel = opLabel;
+  opLabel = 'wipe'; // новые sync отклоняются guard'ом, пока идёт сброс
+  try {
+    const drained = await waitForDrain(10000, floor);
+    if (!drained) return false;
+
+    await chrome.storage.local.remove([
+      K_PHRASE, K_USER, K_LAST_SYNC, K_LAST_ERROR, K_STATS, K_SNAPSHOT,
+      'atr.sync.pendingImport', K_DEVICE
+    ]);
+    // Флаг — после удаления ключей (как в handleDataWipe): открытые вкладки
+    // стирают localStorage сразу, новые — при загрузке; затем syncNow →
+    // фразы уже нет → skip без сети, статистика обнуляется нулями.
+    await chrome.storage.local.set({ [K_WIPE]: Date.now() });
+
+    // Самоочистка узла (best-effort): сбой не важен — новый deviceId при
+    // следующем входе не совпадёт с помеченным, цикла не будет.
+    if (client && userId && deviceId) {
+      try {
+        await client.deleteDevice(userId, deviceId);
+      } catch (err) {
+        console.warn('[ATR] тихий сброс: узел устройства не удалён:', err && err.message);
+      }
+    }
+    console.info('[ATR] устройство удалено из списка другим устройством — локальные данные сброшены');
+    return true;
+  } finally {
+    opLabel = prevLabel;
+  }
+}
+
+/** Минимальный интервал обновления lastSeen в списке устройств (30 мин). */
+const DEVICE_SEEN_THROTTLE_MS = 30 * 60 * 1000;
+
+/**
+ * Регистрация устройства и heartbeat (v0.2.6, §8.9), после успешного sync:
+ *  - записи нет (новое устройство / ротация не перенесла список) → создаём
+ *    с дефолтным именем из UA (переименовать можно в Параметрах, §8.5);
+ *  - есть → `lastSeen` не чаще одного раза в 30 минут (лимит записи).
+ * Сбои гасим: устройства — вторичные данные, сам sync уже успешен
+ * (старые правила БД без `devices` → список `null` → просто молчим).
+ */
+async function syncDeviceActivity(client, userId, deviceId, devices) {
+  if (!devices) return;
+  try {
+    const entry = devices[deviceId];
+    if (!entry) {
+      const name = deviceNameFromUA();
+      await client.putDevice(userId, deviceId, {
+        name,
+        platform: name,
+        createdAt: Date.now(),
+        lastSeen: Date.now()
+      });
+      console.info('[ATR] устройство добавлено в список:', name);
+    } else if (Date.now() - (Number(entry.lastSeen) || 0) > DEVICE_SEEN_THROTTLE_MS) {
+      await client.putDevice(userId, deviceId, { lastSeen: Date.now() });
+    }
+  } catch (err) {
+    console.warn('[ATR] не удалось обновить устройство в списке:', err && err.message);
+  }
+}
+
+// --- Список устройств: три хендлера options (v0.2.6, §8.9) ------------------
+
+/** Guard параллельных операций (тексты как в handleSync) или null. */
+function busyGuard() {
+  if (!opLabel) return null;
+  return opLabel === 'rotate' ? 'идёт смена кодовой фразы' : 'идёт удаление данных';
+}
+
+/**
+ * Общая подготовка хендлеров устройств: guard → конфиг → фраза → userId.
+ * Ошибка → `{error}` (вызывающий отвечает `{ok:false, error}`); успех →
+ * `{config, phrase, userId}`. Сетевая работа — только после этого.
+ */
+async function deviceCtx() {
+  const busy = busyGuard();
+  if (busy) return { error: busy };
+  const { config, ready } = await loadConfig();
+  if (!ready) return { error: 'синхронизация не настроена (нет конфига)' };
+  const phrase = await getPhrase();
+  if (!phrase) return { error: 'нет кодовой фразы — войдите' };
+  const userId = (await getUserId()) || (await deriveUserId(phrase));
+  return { config, phrase, userId };
+}
+
+/** Текст ошибки + подсказка про правила БД (как в handleSync/handleDataWipe). */
+function withRulesHint(err) {
+  let message = String(err && err.message ? err.message : err);
+  if (err && (err.status === 401 || err.status === 403)) {
+    message += ' — проверьте правила Realtime Database (должны быть открыты, см. DEVELOPMENT.md)';
+  }
+  return message;
+}
+
+/**
+ * atr:devices:list — активные устройства для карточки «Устройства» (§8.5).
+ * Флаг `deleted: 1` у СЕБЯ → тихий сброс прямо здесь (пользователь мог
+ * зайти только в Параметры, не открывая вкладку author.today) → {reset:true}.
+ * Чужие удалённые записи в ответ не входят (фильтр deleted).
+ */
+async function handleDevicesList() {
+  const ctx = await deviceCtx();
+  if (ctx.error) return { ok: false, error: ctx.error };
+  const client = initFirebase(ctx.config);
+
+  let devices;
+  try {
+    devices = await client.getDevices(ctx.userId);
+  } catch (err) {
+    return { ok: false, error: withRulesHint(err) };
+  }
+
+  const deviceId = await getDeviceId();
+  const own = devices[deviceId];
+  if (own && own.deleted === 1) {
+    const done = await performRemoteReset(client, ctx.userId, deviceId, 0);
+    if (!done) return { ok: false, error: 'идёт удаление данных — повторите попытку' };
+    return { ok: false, reset: true };
+  }
+
+  const list = Object.entries(devices || {})
+    .filter(([id, d]) => id && d && d.deleted !== 1)
+    .map(([id, d]) => ({
+      id,
+      name: String(d.name || 'Устройство без имени'),
+      platform: String(d.platform || ''),
+      createdAt: Number(d.createdAt) || 0,
+      lastSeen: Number(d.lastSeen) || 0
+    }))
+    .sort((a, b) => (b.lastSeen || b.createdAt) - (a.lastSeen || a.createdAt));
+  return { ok: true, devices: list, ownId: deviceId };
+}
+
+/**
+ * atr:devices:rename {deviceId, name} — переименовать устройство (в т.ч.
+ * своё — задать нормальное имя после первого входа). Имя: trim + схлопывание
+ * пробелов, 1–40 символов. Сначала GET: цель обязана существовать и быть
+ * активной — иначе PATCH создал бы узел из ничего. PATCH по ПУТИ узла:
+ * platform/createdAt/lastSeen сохраняются.
+ */
+async function handleDevicesRename(msg) {
+  const name = String((msg && msg.name) || '').trim().replace(/\s+/g, ' ');
+  if (!name) return { ok: false, error: 'имя устройства не может быть пустым' };
+  if (name.length > 40) return { ok: false, error: 'имя устройства — не длиннее 40 символов' };
+  const deviceId = String((msg && msg.deviceId) || '');
+  if (!deviceId) return { ok: false, error: 'не указано устройство' };
+
+  const ctx = await deviceCtx();
+  if (ctx.error) return { ok: false, error: ctx.error };
+  const client = initFirebase(ctx.config);
+  try {
+    const devices = await client.getDevices(ctx.userId);
+    const target = devices[deviceId];
+    if (!target) return { ok: false, error: 'устройство не найдено (возможно, уже удалено)' };
+    if (target.deleted === 1) return { ok: false, error: 'устройство удалено' };
+    await client.putDevice(ctx.userId, deviceId, { name });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: withRulesHint(err) };
+  }
+}
+
+/**
+ * atr:devices:remove {deviceId} — пометить ЧУЖОЕ устройство удалённым
+ * (`deleted: 1`): оно увидит флаг при следующем sync и тихо сбросит себя
+ * (§8.9). Своё устройство удалить НЕЛЬЗЯ (решение пользователя): кнопки в
+ * options нет, здесь — второй рубеж. Отсутствующее/уже удалённое — `{ok:true}`
+ * (идемпотентность повтора).
+ */
+async function handleDevicesRemove(msg) {
+  const deviceId = String((msg && msg.deviceId) || '');
+  if (!deviceId) return { ok: false, error: 'не указано устройство' };
+
+  const ctx = await deviceCtx();
+  if (ctx.error) return { ok: false, error: ctx.error };
+  if (deviceId === (await getDeviceId())) {
+    return { ok: false, error: 'это устройство удалить нельзя' };
+  }
+  const client = initFirebase(ctx.config);
+  try {
+    const devices = await client.getDevices(ctx.userId);
+    const target = devices[deviceId];
+    if (!target || target.deleted === 1) return { ok: true }; // уже нет — ok
+    await client.putDevice(ctx.userId, deviceId, { deleted: 1 });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: withRulesHint(err) };
   }
 }
 
@@ -281,12 +550,27 @@ async function handleSync(msg, sender) {
       userId = await deriveUserId(phrase); // самовосстановление после чистки storage
       await chrome.storage.local.set({ [K_USER]: userId });
     }
+    const deviceId = await getDeviceId(); // uuid создаётся при первом sync
 
     try {
       const client = initFirebase(config);
-      const result = await client.sync(userId, phrase, (msg && msg.entries) || {});
+      const result = await client.sync(userId, phrase, (msg && msg.entries) || {}, deviceId);
+
+      // Тихий сброс (v0.2.6, §8.9): нас удалили из списка устройств —
+      // фраза/статусы сняты, localStorage страниц стёрся по флагу.
+      // lastSync НЕ пишем: ключ только что удалён сбросом.
+      if (result.reset) {
+        const done = await performRemoteReset(client, userId, deviceId, 1);
+        if (!done) return { ok: false, error: 'идёт удаление данных — повторите попытку' };
+        return { ok: true, reset: true };
+      }
+
       await chrome.storage.local.set({ [K_LAST_SYNC]: new Date().toISOString() });
       await setLastError(null);
+
+      // Регистрация/heartbeat устройства (best-effort, §8.9).
+      await syncDeviceActivity(client, userId, deviceId, result.devices);
+
       // gc (v0.2.1) — workId протухших томбстоунов: content жёстко удалит их
       // локально через storage.applyGc (узлы в БД уже удалены в firebase.js).
       return {
@@ -319,6 +603,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     'atr:phrase:clear': handlePhraseClear,
     'atr:phrase:rotate': handlePhraseRotate,
     'atr:data:wipe': handleDataWipe,
+    'atr:devices:list': handleDevicesList,
+    'atr:devices:rename': handleDevicesRename,
+    'atr:devices:remove': handleDevicesRemove,
     'atr:sync:sync': handleSync
   };
   const handler = handlers[type];

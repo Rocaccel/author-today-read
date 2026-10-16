@@ -1047,6 +1047,285 @@ async function main() {
   assert(removed18.filter((k) => k === 'atr.sync.wipePending').length === 2, '18г: флаг удалялся дважды (идемпотентно)');
   assert(sent18.some((m) => m.type === 'atr:sync:sync'), '18г: после стирания ушёл sync (обнулить кэш статистики)');
 
+  console.log('\n[19] Список устройств и тихий удалённый сброс (v0.2.6, §8.9)');
+
+  globalThis.chrome = swChromeStub;
+  fb.__setConfigForTest({ databaseURL: 'https://fake-rtdb.example.test' });
+
+  // Фейковая RTDB: маршрутизация и по uid, и по типу узла —
+  //   /users/{uid}/marks.json              → отметки
+  //   /users/{uid}/devices.json            → список устройств (GET/PATCH/DELETE)
+  //   /users/{uid}/devices/{deviceId}.json → узел устройства (PATCH мержит поля)
+  const devLog = []; // {method, url, body}
+  const devTrees = {}; // uid → {marks: {}, devices: {}}
+  const tree = (uid) => (devTrees[uid] = devTrees[uid] || { marks: {}, devices: {} });
+  let devFail = null; // {part:'devices'|'marks', status} — старые правила БД/сбой
+  globalThis.fetch = async (url, opts = {}) => {
+    const method = opts.method || 'GET';
+    const u = String(url);
+    const mM = /\/users\/([^/]+)\/marks\.json$/.exec(u);
+    const mD = /\/users\/([^/]+)\/devices(?:\/([^/]+))?\.json$/.exec(u);
+    if (!mM && !mD) throw new Error('неожиданный URL устройств: ' + u);
+    const uid = (mM || mD)[1];
+    const body = opts.body ? JSON.parse(opts.body) : null;
+    devLog.push({ method, url: u, body });
+    if (devFail && ((devFail.part === 'devices' && mD) || (devFail.part === 'marks' && mM))) {
+      return { ok: false, status: devFail.status || 403, json: async () => ({ error: 'Permission denied' }) };
+    }
+    const t = tree(uid);
+    if (mM) {
+      if (method === 'GET') return { ok: true, json: async () => t.marks };
+      if (method === 'PATCH') {
+        for (const [k, v] of Object.entries(body)) {
+          if (v === null) delete t.marks[k];
+          else t.marks[k] = v;
+        }
+        return { ok: true, json: async () => null };
+      }
+      if (method === 'DELETE') {
+        t.marks = {};
+        return { ok: true, json: async () => null };
+      }
+    } else {
+      const id = mD[2];
+      if (method === 'GET') return { ok: true, json: async () => (id ? t.devices[id] || null : t.devices) };
+      if (method === 'PATCH') {
+        // RTDB PATCH мержит тело в существующий узел — как в проде
+        if (id) t.devices[id] = { ...(t.devices[id] || {}), ...body };
+        else Object.assign(t.devices, body); // мерж списка целиком (ротация)
+        return { ok: true, json: async () => null };
+      }
+      if (method === 'DELETE') {
+        if (id) delete t.devices[id];
+        else t.devices = {};
+        return { ok: true, json: async () => null };
+      }
+    }
+    throw new Error('неожиданный метод ' + method);
+  };
+
+  const dPh = 'абсолютно новая системная фраза для списка устройств из множества разных слов тут';
+  const dUid = await phrase.deriveUserId(dPh);
+  const dKeys = [
+    'atr.sync.phrase', 'atr.sync.userId', 'atr.sync.lastSync', 'atr.sync.lastError',
+    'atr.sync.stats', 'atr.sync.snapshot', 'atr.sync.pendingImport', 'atr.sync.deviceId'
+  ];
+  const seedDStore = (deviceId) => {
+    swStore['atr.sync.phrase'] = dPh;
+    swStore['atr.sync.userId'] = dUid;
+    swStore['atr.sync.lastSync'] = '2026-10-16T01:00:00.000Z';
+    swStore['atr.sync.lastError'] = null;
+    swStore['atr.sync.stats'] = { read: 1, skip: 0, total: 1, at: '2026-10-16T01:00:00.000Z' };
+    swStore['atr.sync.snapshot'] = { entries: {}, at: 'x' };
+    swStore['atr.sync.deviceId'] = deviceId;
+    delete swStore['atr.sync.wipePending'];
+  };
+
+  // --- 19а: формы запросов: URL, PATCH по пути узла, мерж полей ---
+  const devClient19 = fb.initFirebase({ databaseURL: 'https://fake-rtdb.example.test' });
+  const UID19 = 'b'.repeat(64);
+  tree(UID19).devices = {};
+  devLog.length = 0;
+  const empty19 = await devClient19.getDevices(UID19);
+  assert(Object.keys(empty19).length === 0, '19а: getDevices при пустом узле → {}');
+  assert(devLog.length === 1 && devLog[0].method === 'GET' && devLog[0].url.includes(`/users/${UID19}/devices.json`), '19а: GET списка уходит на /users/{uid}/devices.json');
+
+  devLog.length = 0;
+  await devClient19.putDevice(UID19, 'dev-A', { name: 'Chrome · Windows', platform: 'Chrome · Windows', createdAt: 1, lastSeen: 1 });
+  assert(devLog.length === 1 && devLog[0].method === 'PATCH' && devLog[0].url.includes('/devices/dev-A.json'), '19а: putDevice — один PATCH по пути узла устройства');
+  assert(devLog[0].body.name === 'Chrome · Windows' && devLog[0].body.platform === 'Chrome · Windows', '19а: тело PATCH — только переданные поля');
+
+  devLog.length = 0;
+  await devClient19.putDevice(UID19, 'dev-A', { lastSeen: 999 });
+  assert(tree(UID19).devices['dev-A'].name === 'Chrome · Windows' && tree(UID19).devices['dev-A'].lastSeen === 999, '19а: частичный PATCH мержит поля, узел не затирается');
+
+  devLog.length = 0;
+  await devClient19.deleteDevice(UID19, 'dev-A');
+  assert(devLog[0].method === 'DELETE' && devLog[0].url.includes('/devices/dev-A.json') && !tree(UID19).devices['dev-A'], '19а: deleteDevice удаляет узел устройства');
+
+  // --- 19б: sync видит deleted:1 у себя → тихий сброс, БЕЗ push/GC ---
+  seedDStore('dev-own');
+  tree(dUid).marks = {};
+  tree(dUid).devices = { 'dev-own': { name: 'Старый ПК', deleted: 1, createdAt: 1 } };
+  devLog.length = 0;
+  let res19 = await callSw({ type: 'atr:sync:sync', entries: { '777': { m: 'read', t: Date.now() } } }, { tab: { id: 7 } });
+  assert(res19.ok === true && res19.reset === true, '19б: sync ответил {ok:true, reset:true}');
+  assert(!devLog.some((c) => c.method !== 'GET' && c.url.includes('/marks')), '19б: к marks только GET — push/GC не выполнялись');
+  assert(!devLog.some((c) => c.method === 'PATCH'), '19б: PATCH не отправлялся вообще');
+  assert(dKeys.every((k) => !(k in swStore)), '19б: 8 ключей удалены (включая deviceId)');
+  assert(swStore['atr.sync.wipePending'] > 0, '19б: флаг вайпа установлен — content стёр localStorage');
+  assert(!('atr.sync.lastSync' in swStore), '19б: lastSync не перезаписан после сброса');
+  assert(devLog.filter((c) => c.method === 'DELETE' && c.url.includes('/devices/dev-own.json')).length === 1, '19б: свой узел устройства удалён (best-effort самоочистка)');
+
+  // --- 19в: старые правила БД (403 списка devices) — мягкая деградация ---
+  seedDStore('dev-own');
+  devFail = { part: 'devices', status: 403 };
+  tree(dUid).marks = {};
+  tree(dUid).devices = {};
+  devLog.length = 0;
+  res19 = await callSw({ type: 'atr:sync:sync', entries: { '777': { m: 'read', t: Date.now() } } }, { tab: { id: 7 } });
+  assert(res19.ok === true && res19.reset !== true && Array.isArray(res19.gc), '19в: sync прошёл несмотря на 403 списка устройств');
+  assert(devLog.some((c) => c.method === 'PATCH' && c.url.includes('/marks.json')), '19в: push отметок состоялся');
+  assert(!devLog.some((c) => c.method === 'PATCH' && c.url.includes('/devices')), '19в: регистрация пропущена (список недоступен)');
+  assert(!!swStore['atr.sync.lastSync'], '19в: lastSync записан');
+  devFail = null;
+
+  // --- 19г: регистрация нового устройства + throttle lastSeen (30 мин) ---
+  seedDStore('dev-new');
+  tree(dUid).marks = {};
+  tree(dUid).devices = {};
+  devLog.length = 0;
+  res19 = await callSw({ type: 'atr:sync:sync', entries: {} }, { tab: { id: 7 } });
+  const reg19 = devLog.find((c) => c.method === 'PATCH' && c.url.includes('/devices/dev-new.json'));
+  assert(res19.ok && reg19, '19г: новое устройство зарегистрировано одним PATCH');
+  assert(reg19.body.name && reg19.body.platform && reg19.body.createdAt > 0 && reg19.body.lastSeen > 0, '19г: запись содержит name/platform/createdAt/lastSeen');
+
+  devLog.length = 0;
+  await callSw({ type: 'atr:sync:sync', entries: {} }, { tab: { id: 7 } });
+  assert(!devLog.some((c) => c.method === 'PATCH' && c.url.includes('/devices')), '19г: lastSeen свежий (<30 мин) — PATCH не отправлен');
+
+  tree(dUid).devices['dev-new'].lastSeen = Date.now() - 31 * 60 * 1000;
+  devLog.length = 0;
+  await callSw({ type: 'atr:sync:sync', entries: {} }, { tab: { id: 7 } });
+  const hb19 = devLog.find((c) => c.method === 'PATCH' && c.url.includes('/devices/dev-new.json'));
+  assert(hb19 && hb19.body.lastSeen > 0 && !('name' in hb19.body), '19г: после 30 минут — heartbeat PATCH только {lastSeen}');
+
+  // --- 19д: список: фильтр удалённых, ownId, содержимое строк ---
+  seedDStore('dev-own');
+  tree(dUid).devices = {
+    'dev-own': { name: 'Мой ноутбук', platform: 'Chrome · Windows', createdAt: 1, lastSeen: 2 },
+    'dev-other': { name: 'Телефон', platform: 'Chrome · Android', createdAt: 3, lastSeen: 4 },
+    'dev-gone': { name: 'Бывший', deleted: 1, createdAt: 5, lastSeen: 6 }
+  };
+  res19 = await callSw({ type: 'atr:devices:list' }, {});
+  const listIds19 = (res19.devices || []).map((d) => d.id);
+  assert(res19.ok && res19.ownId === 'dev-own', '19д: список ok, ownId — своё устройство');
+  assert(listIds19.includes('dev-own') && listIds19.includes('dev-other') && !listIds19.includes('dev-gone'), '19д: удалённые отфильтрованы, активные — в списке');
+  assert(res19.devices.length === 2 && typeof res19.devices[0].name === 'string' && res19.devices[0].platform, '19д: только активные, строки содержат name/platform');
+
+  // --- 19е: свой deleted:1 через список (без вкладок сайта) → тихий сброс ---
+  tree(dUid).devices['dev-own'] = { name: 'Мой ноутбук', deleted: 1, createdAt: 1 };
+  devLog.length = 0;
+  res19 = await callSw({ type: 'atr:devices:list' }, {});
+  assert(res19.ok === false && res19.reset === true, '19е: свой флаг → {ok:false, reset:true}');
+  assert(!('atr.sync.phrase' in swStore) && swStore['atr.sync.wipePending'] > 0, '19е: фраза удалена, флаг вайпа установлен');
+  assert(!('atr.sync.deviceId' in swStore), '19е: deviceId удалён — следующий вход зарегистрирует новое устройство');
+  assert(devLog.filter((c) => c.method === 'DELETE' && c.url.includes('/devices/dev-own.json')).length === 1, '19е: узел самоочищен (best-effort)');
+
+  // --- 19ж: переименование: валидация, существование, trim, PATCH по пути ---
+  seedDStore('dev-own');
+  tree(dUid).devices = {
+    'dev-own': { name: 'Мой', createdAt: 1 },
+    'dev-other': { name: 'Телефон', createdAt: 1 }
+  };
+  devLog.length = 0;
+  res19 = await callSw({ type: 'atr:devices:rename', deviceId: 'dev-other', name: '   ' }, {});
+  assert(res19.ok === false && /пустым/.test(res19.error), '19ж: пустое имя → ошибка');
+  res19 = await callSw({ type: 'atr:devices:rename', deviceId: 'dev-other', name: 'x'.repeat(41) }, {});
+  assert(res19.ok === false && /40/.test(res19.error), '19ж: длиннее 40 символов → ошибка');
+  res19 = await callSw({ type: 'atr:devices:rename', deviceId: '', name: 'Ок' }, {});
+  assert(res19.ok === false && /не указано/.test(res19.error), '19ж: без deviceId → ошибка');
+  assert(devLog.length === 0, '19ж: валидация — сетевых запросов не было');
+
+  devLog.length = 0;
+  res19 = await callSw({ type: 'atr:devices:rename', deviceId: 'dev-404', name: 'Новое имя' }, {});
+  assert(res19.ok === false && /не найдено/.test(res19.error), '19ж: несуществующее устройство → «не найдено»');
+  assert(!devLog.some((c) => c.method === 'PATCH'), '19ж: PATCH не выполнялся — узел не создан из ничего');
+
+  devLog.length = 0;
+  res19 = await callSw({ type: 'atr:devices:rename', deviceId: 'dev-other', name: '  Мой   телефон  ' }, {});
+  const rn19 = devLog.find((c) => c.method === 'PATCH' && c.url.includes('/devices/dev-other.json'));
+  assert(res19.ok && rn19 && rn19.body.name === 'Мой телефон', '19ж: trim + схлопывание пробелов, PATCH {name}');
+  assert(tree(dUid).devices['dev-other'].createdAt === 1, '19ж: createdAt узла сохранён (PATCH по пути узла)');
+
+  tree(dUid).devices['dev-x'] = { name: 'X', deleted: 1, createdAt: 7 };
+  res19 = await callSw({ type: 'atr:devices:rename', deviceId: 'dev-x', name: 'Н' }, {});
+  assert(res19.ok === false && /удалено/.test(res19.error), '19ж: rename удалённого устройства → отказ');
+
+  // --- 19з: удаление: своё нельзя, чужое → deleted:1, идемпотентно, 403 ---
+  devLog.length = 0;
+  res19 = await callSw({ type: 'atr:devices:remove', deviceId: 'dev-own' }, {});
+  assert(res19.ok === false && /нельзя/.test(res19.error), '19з: своё устройство удалить нельзя');
+  assert(devLog.length === 0, '19з: отказ без сетевых запросов');
+
+  res19 = await callSw({ type: 'atr:devices:remove', deviceId: 'dev-other' }, {});
+  assert(res19.ok === true && tree(dUid).devices['dev-other'].deleted === 1, '19з: чужое устройство → deleted: 1');
+  assert(tree(dUid).devices['dev-other'].name === 'Мой телефон', '19з: остальные поля узла не затёрты');
+
+  devLog.length = 0;
+  res19 = await callSw({ type: 'atr:devices:remove', deviceId: 'dev-other' }, {});
+  assert(res19.ok === true && !devLog.some((c) => c.method === 'PATCH'), '19з: повтор уже удалённого — ok без PATCH (идемпотентно)');
+
+  devFail = { part: 'devices', status: 403 };
+  res19 = await callSw({ type: 'atr:devices:remove', deviceId: 'dev-z' }, {});
+  assert(res19.ok === false && /правила/i.test(res19.error), '19з: 403 → ошибка со ссылкой на правила БД');
+  res19 = await callSw({ type: 'atr:devices:list' }, {});
+  assert(res19.ok === false && /правила/i.test(res19.error), '19з: и список при 403 — подсказка про правила');
+  devFail = null;
+
+  // --- 19и: ротация фразы переносит список устройств на новый userId ---
+  const rotOld19 = 'старая совершенно обычная кодовая фраза для ротации устройств из множества разных слов тут';
+  const rotNew19 = 'новая совершенно другая кодовая фраза для ротации устройств из других новых слов тут сейчас';
+  assert(!phrase.validatePhrase(rotOld19) && !phrase.validatePhrase(rotNew19), '19и: обе фразы ротации валидны');
+  const rotOldUid19 = await phrase.deriveUserId(rotOld19);
+  const rotNewUid19 = await phrase.deriveUserId(rotNew19);
+  swStore['atr.sync.phrase'] = rotOld19;
+  swStore['atr.sync.userId'] = rotOldUid19;
+  swStore['atr.sync.snapshot'] = { entries: { '5': { m: 'read', t: 500 } }, at: 'x' };
+  tree(rotOldUid19).marks = {};
+  tree(rotNewUid19).marks = {};
+  tree(rotOldUid19).devices = {
+    'dev-mig': { name: 'Ноутбук', platform: 'Linux', createdAt: 1 },
+    'dev-gone2': { name: 'Гость', deleted: 1, createdAt: 2 }
+  };
+  tree(rotNewUid19).devices = {};
+  devLog.length = 0;
+  res19 = await callSw({ type: 'atr:phrase:rotate', phrase: rotNew19 }, {});
+  const devPatch19 = devLog.find((c) => c.method === 'PATCH' && c.url.includes(`/users/${rotNewUid19}/devices.json`));
+  assert(res19.ok === true && res19.migrated === 1, '19и: ротация прошла, запись снапшота переехала');
+  assert(devPatch19 && devPatch19.body['dev-mig'] && devPatch19.body['dev-mig'].name === 'Ноутбук', '19и: устройства перенесены PATCH на новый userId');
+  assert(tree(rotNewUid19).devices['dev-gone2'] && tree(rotNewUid19).devices['dev-gone2'].deleted === 1, '19и: флаг deleted у перенесённого устройства сохранён');
+  assert(devLog.filter((c) => c.method === 'DELETE' && c.url.includes(`/users/${rotOldUid19}/devices.json`)).length === 1, '19и: старый узел devices удалён ровно один раз');
+  assert(!tree(rotOldUid19).devices['dev-mig'], '19и: у старого userId устройств больше нет');
+
+  // --- 19к: старые правила (403 devices) не проваливают ротацию ---
+  devFail = { part: 'devices', status: 403 };
+  res19 = await callSw({ type: 'atr:phrase:rotate', phrase: rotOld19 }, {});
+  assert(res19.ok === true && res19.userId === rotOldUid19, '19к: 403 списка devices — ротация всё равно успешна');
+  devFail = null;
+
+  // --- 19л: вайп удаляет deviceId (после вайпа — новое устройство) ---
+  fb.__setConfigForTest({}); // без конфига — облако пропущено, локальное чистится
+  swStore['atr.sync.deviceId'] = 'dev-wipe';
+  delete swStore['atr.sync.wipePending'];
+  res19 = await callSw({ type: 'atr:data:wipe' }, {});
+  assert(res19.ok && res19.reason === 'no-config', '19л: вайп без конфига прошёл');
+  assert(!('atr.sync.deviceId' in swStore) && swStore['atr.sync.wipePending'] > 0, '19л: deviceId удалён вместе с остальными ключами');
+  fb.__setConfigForTest({ databaseURL: 'https://fake-rtdb.example.test' });
+
+  // --- 19м: content принимает {ok:true, reset:true} как успех (без ретрая) ---
+  const sent19c = [];
+  const dom19c = new JSDOM(HTML, { url: 'https://author.today/work/genre/fantasy', runScripts: 'outside-only', pretendToBeVisual: true });
+  dom19c.window.chrome = {
+    runtime: {
+      sendMessage: async (msg) => {
+        sent19c.push(msg);
+        if (msg.type === 'atr:sync:sync') return { ok: true, reset: true };
+        return { ok: true };
+      }
+    }
+  };
+  for (const f of ['content/storage.js', 'content/sync.js', 'content/ui.js', 'content/dom.js', 'content/main.js']) {
+    dom19c.window.eval(read(f));
+  }
+  // Короткий backoff ДО первого ответа: если reset ошибкой ушёл бы в retry,
+  // повтор успеет уложиться в окно ожидания ниже.
+  dom19c.window.ATR.sync.__setRetryDelays([1000]);
+  assert(await waitFor(() => sent19c.some((m) => m.type === 'atr:sync:sync'), 2000), '19м: init отправил первый sync');
+  await sleep(2500);
+  const syncs19 = sent19c.filter((m) => m.type === 'atr:sync:sync').length;
+  assert(syncs19 === 1, '19м: reset:true принят как успех — повторов не было (было: ' + syncs19 + ')');
+
   globalThis.fetch = realFetch;
 
   console.log(failures === 0 ? '\nВСЕ ТЕСТЫ ПРОЙДЕНЫ' : `\nПРОВАЛОВ: ${failures}`);

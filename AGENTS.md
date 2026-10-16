@@ -283,7 +283,11 @@ pjax-ссылки в своём `.panel-actions` (внутри `.panel-heading`)
   пишет options, применяет и удаляет content, см. §8.5),
   **`atr.sync.wipePending`** (timestamp старта полного вайпа, v0.2.6;
   пишет options/SW после успешного удаления облака, применяет и удаляет
-  content — стирает localStorage страницы, см. §8.8).
+  content — стирает localStorage страницы, см. §8.8),
+  **`atr.sync.deviceId`** (uuid этого устройства, v0.2.6, §8.9;
+  генерируется `crypto.randomUUID()` при первом sync/запросе списка,
+  регистрирует устройство в `users/{userId}/devices/`; удаляется при
+  тихом сбросе и вайпе — следующий вход создаёт НОВОЕ устройство).
 - Фраза хранится ТОЛЬКО здесь (читает только расширение); в page localStorage
   не попадает — сайт author.today её не видит.
 - Требует `"permissions": ["storage"]` в manifest.
@@ -415,9 +419,12 @@ author-today-read/
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `loadConfig()`                  | кэшированный `fetch(chrome.runtime.getURL('background/config.json'))` (`.ok ? json : {}`, catch → пустой конфиг) → `{config, ready}` (ready = `!!databaseURL`; файла может не быть)                                                                                                                                                                             |
 | `__setConfigForTest(config)`    | тестовый хук (npm test): подменяет кэш `configPromise` напрямую, минуя fetch config.json (прецедент — `__setRetryDelays` в content/sync.js; нужен, потому что `loadConfig` кэширует `ready:false` после [14]) |
-| `initFirebase(config)` → клиент | `isReady()` (databaseURL), `pullDocs(userId)` (GET `{db}/users/{uid}/marks.json`; пустое дерево → `null` → `[]`), `sync(userId, phrase, localEntries)` → **`{pull, pushed, skipped, gc}`**: расшифровывает облако, пушит локальное новее облака одним `PATCH`, возвращает облачное новее локального + список `gc` протухших томбстоунов (v0.2.1, §8); `deleteDocs(userId, wids)` — PATCH с `{wid: null}` (удаление узлов); **`rotate(oldUserId, oldPhrase, newUserId, newPhrase, snapshotEntries)`** (v0.2.6, §8.7) → `{migrated, skipped}`: LWW-слияние (A — старый путь старым ключом ∪ B — снапшот `atr.sync.snapshot` ∪ C — новый путь новым ключом, идемпотентность повтора) → перешифровка → **один PATCH** на новый путь → **только после успеха PATCH** `DELETE users/{oldUid}/marks.json` (узел `marks`, НЕ `users/{uid}` — права `.write` только на подузел §8.2); сбой на любом шаге = ничего не изменилось; томбстоуны переносятся, GC не применяется. Ошибки HTTP — исключение со свойством `status` |
+| `initFirebase(config)` → клиент | `isReady()` (databaseURL), `pullDocs(userId)` (GET `{db}/users/{uid}/marks.json`; пустое дерево → `null` → `[]`), `sync(userId, phrase, localEntries, deviceId)` → **`{pull, pushed, skipped, gc, devices}`**: расшифровывает облако, пушит локальное новее облака одним `PATCH`, возвращает облачное новее локального + список `gc` протухших томбстоунов (v0.2.1, §8); marks и devices читаются параллельно (`Promise.all`), список устройств при ошибке → `null` (старые правила — sync не падает, §8.9); **`{reset: true}`** при `devices[deviceId].deleted === 1` — ранний возврат ДО push/GC: `{pull:{}, pushed:0, skipped:0, gc:[], devices, reset:true}` (§8.9); `deleteDocs(userId, wids)` — PATCH с `{wid: null}` (удаление узлов); **`rotate(...)`** (v0.2.6, §8.7) → `{migrated, skipped}`: LWW-слияние → перешифровка → **один PATCH** на новый путь → **только после успеха PATCH** `DELETE users/{oldUid}/marks.json` → затем best-effort перенос `devices` (GET старого → PATCH нового → DELETE старого; сбой/403 → `console.warn`, ротация НЕ проваливается, §8.9); ошибка HTTP — исключение со свойством `status` |
 | `GC_TOMBSTONE_MS` (экспорт)     | `90 * 24 * 60 * 60 * 1000` — срок жизни томбстоунов (v0.2.1); живые отметки GC не трогает никогда                                                                                                                                                                                                                                                             |
-| `clearCloud(userId)`           | **Полный вайп (v0.2.6, §8.8):** один `DELETE {db}/users/{uid}/marks.json` — удаляет узел `marks` целиком (права `.write` только на подузел §8.2, как в `rotate`); идемпотентен (нет узла → ok); HTTP-ошибка → исключение `wipe-cloud: HTTP …` — вызывающий НЕ трогает локальные данные |
+| `clearCloud(userId)`           | **Полный вайп (v0.2.6, §8.8):** один `DELETE {db}/users/{uid}/marks.json` — удаляет узел `marks` целиком; затем best-effort `DELETE …/devices.json` (сбой → `console.warn`, вайп не проваливается — чужие устройства просто увидят пометку позже); идемпотентен; HTTP-ошибка marks → исключение `wipe-cloud: HTTP …` — вызывающий НЕ трогает локальные данные |
+| `getDevices(userId)`           | **Список устройств (v0.2.6, §8.9):** GET `{db}/users/{uid}/devices.json` → `{deviceId: {name, platform, createdAt, lastSeen, deleted?}}`; пустое дерево → `{}`; ошибка → исключение `devices-get: HTTP …` (свойство `status`) |
+| `putDevice(userId, deviceId, data)` | **PATCH по ПУТИ узла** `{db}/users/{uid}/devices/{deviceId}.json` — тело мержится в существующий узел (частичный `{name}` НЕ затирает `platform/createdAt/deleted`; PATCH вложенным объектом `{id:{...}}` затёр бы узел — поэтому API работает только через `deviceUrl`) |
+| `deleteDevice(userId, deviceId)` | DELETE `{db}/users/{uid}/devices/{deviceId}.json` — удаляет узел устройства целиком (не «пометку deleted»); идемпотентен (узла нет → ok); ошибка → `devices-delete: HTTP …` |
 
 **`background/service-worker.js` (роутер `chrome.runtime.onMessage`)**
 
@@ -427,8 +434,11 @@ author-today-read/
 | `atr:phrase:set`   | `{phrase}` → валидация, `deriveUserId`, сохранение в `chrome.storage.local` → `{ok, userId}` / `{ok:false, error}`                                                                                                                         |
 | `atr:phrase:clear` | `→ {ok}` (удаляет фразу/userId/ошибку)                                                                                                                                                                                                     |
 | `atr:phrase:rotate` | `{phrase}` (v0.2.6) → `rotating=true` синхронно до первого await → drain незавершённых sync (новые `atr:sync:sync` в это время отклоняются guard'ом до инкремента счётчика) → проверки: конфиг (`ready`), есть текущая фраза, валидность новой, не совпадает ли с текущей → `firebase.rotate(...)` → **ТОЛЬКО после успеха** сохранение новой фразы/userId/`lastSync` в `chrome.storage.local` → `{ok, userId, migrated, skipped}` / `{ok:false, error}` (при сбое хранилище и старый путь не тронуты — повтор безопасен) |
-| `atr:sync:sync`    | `{entries}` → **сначала кэш статистики и снапшота** (v0.2.2/0.2.4: `computeStats(entries)` → `atr.sync.stats` + `entries` → `atr.sync.snapshot`, ТОЛЬКО если `sender.tab` — options со своим `entries:{}` ничего не трогает; до проверок конфига/фразы) → полный round-trip с Realtime Database → `{ok, pull, pushed, skipped, gc}` либо `{ok:false, skip:true, reason:'config'\|'phrase'}` (не ошибка!) либо `{ok:false, error}` (сеть/правила, текст сохраняется в `atr.sync.lastError`; content ретраит с backoff, §4.2) |
-| `atr:data:wipe`     | **Полный вайп (v0.2.6, §8.8):** `opLabel='wipe'` синхронно до первого await → drain незавершённых sync (новые `atr:sync:sync` отклоняются guard'ом «идёт удаление данных») → **порядок операции:** есть конфиг? (`no-config`) → `clearCloud` при готовности и фразе (`no-phrase` — пропуск облака; сбой → `{ok:false, error}`, локальное НЕ тронуто) → удаление 7 ключей (`phrase`, `userId`, `lastSync`, `lastError`, `stats`, `snapshot`, `pendingImport`) → установка `atr.sync.wipePending` → `{ok, cloudDeleted, reason}`; catch → `lastError` + `{ok:false, error}`, флаг не ставится |
+| `atr:sync:sync`    | `{entries}` → **сначала кэш статистики и снапшота** (v0.2.2/0.2.4: `computeStats(entries)` → `atr.sync.stats` + `entries` → `atr.sync.snapshot`, ТОЛЬКО если `sender.tab` — options со своим `entries:{}` ничего не трогает; до проверок конфига/фразы) → **регистрация устройства** (v0.2.6, §8.9): `getDeviceId()` (uuid из `atr.sync.deviceId`) + `putDevice` `{name: deviceNameFromUA(), platform, createdAt, lastSeen}` — best-effort, heartbeat не чаще 30 мин (`DEVICE_SEEN_THROTTLE_MS`); затем **детект тихого сброса**: свой `devices[deviceId].deleted === 1` → `performRemoteReset(client, userId, deviceId, floor=1)` → `{ok:true, reset:true}` (контент повторно НЕ ретраит, §8.9); далее полный round-trip → `{ok, pull, pushed, skipped, gc}` либо `{ok:false, skip:true, reason:'config'\|'phrase'}` (не ошибка!) либо `{ok:false, error}` (сеть/правила, текст сохраняется в `atr.sync.lastError`; content ретраит с backoff, §4.2) |
+| `atr:data:wipe`     | **Полный вайп (v0.2.6, §8.8):** `opLabel='wipe'` синхронно до первого await → drain незавершённых sync (новые `atr:sync:sync` отклоняются guard'ом «идёт удаление данных») → **порядок операции:** есть конфиг? (`no-config`) → `clearCloud` при готовности и фразе (`no-phrase` — пропуск облака; сбой → `{ok:false, error}`, локальное НЕ тронуто) → удаление 8 ключей (`phrase`, `userId`, `lastSync`, `lastError`, `stats`, `snapshot`, `pendingImport`, `deviceId`) → установка `atr.sync.wipePending` → `{ok, cloudDeleted, reason}`; catch → `lastError` + `{ok:false, error}`, флаг не ставится |
+| `atr:devices:list`  | **v0.2.6, §8.9:** `→ {ok:true, devices:[{id, name, platform, createdAt, lastSeen, own, removed?}], ownId}` — `getDevices`, удалённые (`deleted`) отфильтрованы (своя строка идёт с `removed:true`), `own = id === ownId`, сортировка по `lastSeen` (новые выше); свой `deleted: 1` → `{ok:false, reset:true}` (`performRemoteReset`, floor=0); ошибка → `{ok:false, error}`, при HTTP 403 — текст «…правила БД…» |
+| `atr:devices:rename` | `{id, name}` → guard `busyGuard()` (тексты «идёт смена кодовой фразы»/«идёт удаление данных») → валидация: нет `id`/фразы/конфига, trim + схлопывание пробелов, длина 1–40 (иначе `{ok:false, error}`); `getDevices` → устройства нет либо `deleted` → «не найдено» (без PATCH — узел не создаётся из ничего) → `putDevice(userId, id, {name})` → `{ok:true}`; 403 → ошибка со словом «правила» |
+| `atr:devices:remove` | `{id}` → guard `busyGuard()` → нет фразы/конфига → ошибка; **свой id → `{ok:false, error}` без сетевых запросов** («своё устройство удалить нельзя» — сброс выполняется только тихо через `atr:sync:sync`); чужое → `putDevice(userId, id, {deleted:1})` (частичный PATCH не затирает `name/createdAt`); уже `deleted` → `{ok:true}` без PATCH (идемпотентно); 403 → ошибка с подсказкой про правила БД |
 
 `computeStats(entries)` — экспорт service-worker.js: `{read, skip, total, at}`;
 томбстоуны (`m:null`) и мусор не считаются, `total = read + skip`.
@@ -436,8 +446,9 @@ author-today-read/
 content-вкладку от options-страницы.
 
 `options/options.js` — чистый UI: `generatePhrase/validatePhrase/normalizePhrase`
-из shared + те же 6 сообщений (`atr:status`, `atr:phrase:set`, `atr:phrase:clear`,
-`atr:phrase:rotate`, `atr:sync:sync`, `atr:data:wipe`); локальных данных не хранит.
+из shared + те же 9 сообщений (`atr:status`, `atr:phrase:set`, `atr:phrase:clear`,
+`atr:phrase:rotate`, `atr:sync:sync`, `atr:data:wipe`, `atr:devices:list`,
+`atr:devices:rename`, `atr:devices:remove`); локальных данных не хранит.
 
 **`shared/backup.js` (ES-модуль, только options; v0.2.4, §8.5)**
 
@@ -563,10 +574,15 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
    ([14]), бэкап JSON ([15]), тумблер «Скрыть отмечённые» ([16], v0.2.5),
    ротацию фразы ([17], v0.2.6): отказы до сети, drain/guard, миграция
    LWW + перешифровка, порядок PATCH → DELETE, сбой PATCH → повтор,
-   реакция открытой вкладки на сохранение/смену фразы (17г), и полный
+   реакция открытой вкладки на сохранение/смену фразы (17г), полный
    вайп ([18], v0.2.6): no-config/no-phrase, откат при сбое DELETE,
-   guard «удаление данных», 7 ключей + флаг, content-стирание (init и
-   onChanged), событие `atr:wipe`, идемпотентность.
+   guard «удаление данных», 8 ключей + флаг, content-стирание (init и
+   onChanged), событие `atr:wipe`, идемпотентность, и устройства с тихим
+   сбросом ([19], v0.2.6): URL/PATCH-мерж devices, `{reset:true}` без
+   push, ранний возврат до GC, 403-деградация, регистрация + heartbeat
+   30 мин, список/фильтр/ownId, rename/remove валидация и отказ self-delete,
+   перенос devices при ротации, чистка `deviceId` при вайпе, content не
+   ретраит `reset:true`.
    Все проверки должны быть `ok`, итог «ВСЕ ТЕСТЫ ПРОЙДЕНЫ».
 1. `chrome://extensions` → режим разработчика → «Загрузить распакованное
    расширение» → папка `extension/`. Без ошибок в manifest.
@@ -661,6 +677,21 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
     без фразы → итог «Облако не тронуто…», локальное стёрто; сбой сети →
     ошибка в форме, фраза/отметки на месте, повтор работает. Автотесты —
     секция [18].
+26. **Устройства и тихий сброс (v0.2.6)**: Параметры → «Устройства» (видна
+    только с фразой и конфигом) → в списке есть строка текущего устройства
+    с бейджем «Это устройство», платформа и время; на втором устройстве с
+    той же фразой (или после входа в другой вкладке/браузере) появляется
+    вторая строка. Переименовать чужую строку → имя обновилось (в
+    Firebase-консоли узел `devices/{id}` содержит новое `name`, прежние
+    поля не затёрты). «Удалить» на чужой → подтверждение → строка уходит
+    (`deleted: 1`); удалённое устройство при следующем sync **тихо**:
+    локальные отметки стёрты (открытая вкладка — сразу), фраза удалена,
+    options показывает плашку «Данные удалены другим устройством…»;
+    `atr.sync.deviceId` удалён — повторный вход регистрирует устройство
+    заново. Кнопок удаления у своей строки нет; `atr:devices:remove` своего
+    id из консоли → отказ без запроса. Старые правила БД (без `devices`) →
+    карточка показывает ошибку с подсказкой про правила, sync/ротация/вайп
+    работают. Автотесты — секция [19].
 
 ---
 
@@ -693,7 +724,7 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 
 ---
 
-## 8. Синхронизация с Firebase (v0.2.0; доработки: ретраи + GC v0.2.1, ротация и вайп v0.2.6)
+## 8. Синхронизация с Firebase (v0.2.0; доработки: ретраи + GC v0.2.1, ротация, вайп и устройства v0.2.6)
 
 ### 8.1. Архитектура
 
@@ -701,10 +732,15 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 [страница author.today]                       [background SW]          [Realtime Database]
 content/storage.js (кэш v2)  atr:sync:sync   service-worker.js   GET/PATCH .json
 content/sync.js ──────────────────────────►  firebase.js  ─────────────────►  users/{uid}/marks/*
-        ▲                                       │ sha256/pbkdf2/aes
+        ▲                                       │ sha256/pbkdf2/aes           users/{uid}/devices/* (v0.2.6)
         └── merge LWW (pull) ◄─────────────────┘ из chrome.storage.local
-                 options/options.js ── те же 6 сообщений ──►
+                 options/options.js ── те же 9 сообщений ──►
 ```
+
+- **Список устройств и тихий сброс (v0.2.6, §8.9)**: параллельно с marks
+  читается `users/{uid}/devices` — свежий `sync` регистрирует/обновляет своё
+  устройство, а увидев `deleted: 1` у своего `deviceId`, тихо стирает локальные
+  данные («как после установки») без всплывашек.
 
 - **Сеть только в background** (CORS расширения, `host_permissions`); content
   шлёт готовый срез `{wid:{m,t}}` и получает готовый pull.
@@ -731,6 +767,14 @@ users/{userId}/marks/{workId} → {
   v: "1", iv: string,   // ОТКРЫТО — версия схемы и nonce (base64)
   ct:  string           // шифротекст JSON {m: "read"|"skip"|null} (base64)
 }
+
+users/{userId}/devices/{deviceId} → {          // v0.2.6, §8.9 — БЕЗ шифрования
+  name:     string,    // «Chrome · Windows» или переименованное пользователем
+  platform: string,    // данные UA
+  createdAt: integer,  // время первой регистрации
+  lastSeen:  integer,  // heartbeat (не чаще раза в 30 мин)
+  deleted?: 1          // ПОМЕТКА удаления (единственное значение; нет поля = активно)
+}
 ```
 
 - `userId = hex(SHA-256(нормализованной фразы))` — детерминирован, одинаков
@@ -744,6 +788,10 @@ users/{userId}/marks/{workId} → {
     "users": {
       "$userId": {
         "marks": {
+          ".read": true,
+          ".write": true
+        },
+        "devices": {
           ".read": true,
           ".write": true
         }
@@ -764,7 +812,12 @@ users/{userId}/marks/{workId} → {
   - **delete узла (ротация, v0.2.6):** `DELETE {databaseURL}/users/{uid}/marks.json`
     — удаляет узел `marks` целиком. Идёт ТОЛЬКО на подузел `marks`: правила
     §8.2 дают `.write` именно на него, поэтому **правила БД менять не нужно**
-    (на родительском `users/{uid}` delete получил бы 403).
+    (на родительском `users/{uid}` delete получил бы 403);
+  - **devices (v0.2.6, §8.9):** `GET/DELETE …/users/{uid}/devices.json`,
+    `GET/DELETE …/users/{uid}/devices/{deviceId}.json`, `PATCH` **по пути
+    узла устройства** с телом `{name}`, `{deleted:1}` и т.п. — RTDB мержит
+    поля в существующий узел. При старых правилах (без `devices`) эти запросы
+    получают 403: sync деградирует мягко, ротация/вайп не проваливаются.
 
 ### 8.2а. GC томбстоунов (v0.2.1)
 
@@ -863,6 +916,24 @@ users/{userId}/marks/{workId} → {
     нужна, когда вкладки сайта нет. Импорт синхронизируется в облако
     обычным push (нужна настроенная фраза/конфиг; без них — просто
     локальное объединение).
+- **«Устройства»** (v0.2.6, §8.9): карточка `#devices-block` между «Статистикой»
+  и «Удаление данных», видна только при `hasPhrase && configReady` (рендер —
+  `renderStatus()`); список `#devices-list` строк `.device-row`: имя (или
+  «Устройство N» при пустом), muted `platform · последняя активность`,
+  бейдж «Это устройство» (`device-badge`) у `own` и «Удалено» у `removed`.
+  Загрузка — `loadDevices()` из `refresh()` (шлёт `atr:devices:list`), ошибка —
+  `#devices-error` (в т.ч. подсказка про правила БД); увидев свой
+  `{reset:true}` — `applyRemoteResetNotice()` (плашка `#wipe-done` с особым
+  текстом «Данные удалены другим устройством…»). Кнопки чужой строки:
+  **«Переименовать»** (инлайн-инпут, Enter/«Сохранить» → `atr:devices:rename`,
+  автосброс 5 с, после успеха `refresh()`) и **«Удалить»** (двухшаговая:
+  «Удалить» → «Удалить — точно?», автосброс 5 с → `atr:devices:remove`).
+  Своё устройство — **без кнопок** (удаление себе запрещено и в UI, и в SW);
+  после удаления чужого — `refresh()` (строка уходит, т.к. `deleted` фильтруется).
+  При входе (`onLogin`) помимо `refresh()` уходит best-effort
+  `atr:sync:sync {}` (регистрация устройства), затем `loadDevices(true)` —
+  флаг `focusOwn` даёт автосброс inline-редактирования своей строки, но
+  потребляется только когда строка реально показана.
 - **«Удаление данных»** (v0.2.6, §8.8): карточка `#wipe-block` с muted-описанием
   и красной кнопкой `Удалить все данные…` (`#btn-wipe`) → раскрывает скрытую
   форму `#wipe-form`: предупреждение `alert-warning` (отметки необратимы;
@@ -922,10 +993,14 @@ users/{userId}/marks/{workId} → {
      повторного запуска; конфликт — побеждает больший `t`);
    - перешифровка всего merged новым ключом → **один атомарный PATCH**
      на новый путь;
-   - **только после успешного PATCH** — `DELETE` старого узла
-     `users/{oldUid}/marks.json` (не `users/{oldUid}` — права только на
-     `marks`, §8.2; правила БД не меняются);
-   - возврат `{migrated, skipped}`.
+    - **только после успешного PATCH** — `DELETE` старого узла
+      `users/{oldUid}/marks.json` (не `users/{oldUid}` — права только на
+      `marks`, §8.2; правила БД не меняются);
+    - затем **best-effort перенос устройств** (v0.2.6, §8.9): GET
+      `users/{oldUid}/devices` → PATCH на новый userId (все поля, включая
+      `deleted`) → DELETE старого узла; 403/сбой → `console.warn`,
+      ротация НЕ проваливается;
+    - возврат `{migrated, skipped}`.
 5. **ТОЛЬКО после успешного rotate** — сохранение новой
    фразы/userId/`lastSync` в `chrome.storage.local` и сброс `lastError`.
 6. `finally { rotating = false }`.
@@ -966,9 +1041,12 @@ DELETE не выполнялся; DELETE не прошёл → фраза не �
    `DELETE users/{uid}/marks.json`; без фразы → `reason: 'no-phrase'`
    (облако не тронуто — расшифровать/подтвердить путь нечем); сбой →
    `{ok:false, error}` с `lastError` — **локальное НЕ тронуто**, флаг не
-   ставится, повтор безопасен.
-5. Удаление 7 ключей `chrome.storage.local`: `phrase`, `userId`,
-   `lastSync`, `lastError`, `stats`, `snapshot`, `pendingImport`.
+   ставится, повтор безопасен. Устройство при этом best-effort удаляется
+   из списка (`DELETE users/{uid}/devices.json`, сбой → `console.warn`).
+5. Удаление 8 ключей `chrome.storage.local`: `phrase`, `userId`,
+   `lastSync`, `lastError`, `stats`, `snapshot`, `pendingImport`,
+   `deviceId` (после вайпа следующий вход зарегистририрует НОВОЕ
+   устройство, §8.9).
 6. Установка **`atr.sync.wipePending`** (timestamp) — сигнал content.
 7. Возврат `{ok, cloudDeleted, reason}`; `finally { opLabel = null }`.
 
@@ -998,6 +1076,79 @@ DELETE не выполнялся; DELETE не прошёл → фраза не �
 Реальный риск — **другие устройства**: их отметки при следующей
 синхронизации снова уйдут в облако; поэтому UI прямо предупреждает
 (§8.5), а итог предлагает открыть сайт.
+
+### 8.9. Список устройств и тихий удалённый сброс (v0.2.6)
+
+Каждое устройство с фразой регистрируется в `users/{uid}/devices/{deviceId}`
+(§8.2). Устройство видит свой список в options и может **переименовать**
+любую строку или **удалить чужое** — удалённое устройство при следующей
+синхронизации **тихо стирает свои локальные данные и выходит из фразы**
+(«как после установки»), без всплывашек и без подтверждений.
+
+**Жизненный цикл `deviceId`:**
+
+- ключ **`atr.sync.deviceId`** (§3.3) — uuid (`crypto.randomUUID()`),
+  лениво создаётся `getDeviceId()` при первом sync или запросе списка;
+- **регистрация** — в `handleSync`, best-effort: `putDevice` `{name:
+  deviceNameFromUA(), platform, createdAt, lastSeen}`; heartbeat `lastSeen`
+  не чаще раза в 30 мин (`DEVICE_SEEN_THROTTLE_MS`): свежий `lastSeen`
+  → PATCH пропускается; старше → PATCH только `{lastSeen}`;
+- **удаление ключа** — при тихом сбросе (ниже) и вайпе (§8.8): следующий
+  вход = новое устройство в списке. Это же **защита от зацикливания**:
+  уже сброшенное устройство не увидит свой флаг повторно;
+- при **ротации фразы** (§8.7) `deviceId` НЕ меняется — узлы devices
+  переезжают на новый userId (best-effort после успеха marks).
+
+**Детект и тихий сброс:**
+
+1. `firebase.sync()` читает marks и devices параллельно (`Promise.all`);
+   список при ошибке → `null` (старые правила без `devices` → 403 → sync
+   работает как раньше).
+2. Ранний возврат `{pull:{}, pushed:0, skipped:0, gc:[], devices,
+   reset:true}`, **ЕСЛИ** `devices[deviceId].deleted === 1` — **до push и
+   GC** (чужие не получат наши данные). Повторная регистрация устройства
+   в этом sync пропускается (узел уже помечен).
+3. `handleSync` при `result.reset` → `performRemoteReset(client, userId,
+   deviceId, floor=1)` → ответ контенту `{ok:true, reset:true}`.
+4. **`performRemoteReset`** (service-worker.js): guard `opLabel='wipe'`
+   (другая операция уже идёт → отказ, ничего не тронуто) →
+   `waitForDrain(10000, floor)` — floor=1 из handleSync, чтобы sync НЕ
+   ждал сам себя (deadlock), floor=0 из list → удаление 8 ключей (§8.8
+   шаг 5, включая `deviceId`) → `set({atr.sync.wipePending: Date.now()})`
+   → best-effort `deleteDevice` своего узла (самоочистка списка;
+   `finally { opLabel = prevLabel }`. Возвращает `false`, если drain не
+   дошёл — **ничего не тронуто**, вызывающий отвечает ошибкой («идёт
+   удаление данных»).
+5. Контент принимает `{ok:true, reset:true}` как обычный ok: `res.pull`
+   пуст → слияний нет; `res.gc` пуст → GC не выполняется (guard'ы в
+   sync.js, проверено тестом [19м]); затем флаг `wipePending` применяется
+   как при вайпе (§8.8): стирает localStorage, снимает pref, шлёт sync →
+   он уже `skip` (фраза удалена). **Контент НЕ ретраит** — новых сообщений
+   в коде не появилось.
+
+**Одноразовый сброс из options:** детект работает и в `atr:devices:list`
+(без site-вкладок): свой флаг → `{ok:false, reset:true}` →
+`performRemoteReset(floor=0)` → options показывает плашку `#wipe-done`
+особым текстом («Данные удалены другим устройством…», `applyRemoteResetNotice`)
+и сбрасывает состояние в UI.
+
+**Ограничения (осознанно):**
+
+- **своё устройство удалить нельзя**: кнопки в UI нет, `atr:devices:remove`
+  своего id → отказ **без сетевых запросов**; сброс себе выполняется только
+  тихо через sync (иначе потеряется смысл «тихого» сброса);
+- восстановление удалённого устройства не предусмотрено (повторный вход =
+  новое устройство, «Удалено» — не interactive);
+- **правила БД** должны разрешать `devices` (§8.2): при старых правилах
+  все devices-операции получают 403 — sync мягко деградирует, ротация/вайп
+  не проваливаются, UI показывает подсказку «правила БД»; новые правила
+  публикует пользователь в консоли Firebase (сниппет §8.2/DEVELOPMENT.md).
+
+**Реестр сообщений (9, §4.2):** `atr:devices:list` →
+`{ok, devices, ownId}` / `{ok:false, reset}` / `{ok:false, error}`;
+`atr:devices:rename` `{id, name}` → `{ok}`; `atr:devices:remove` `{id}` →
+`{ok}`. Все три под guard'ом `busyGuard()` (тексты ротации/вайпа) и с
+текстом «правила» при 403.
 
 ---
 

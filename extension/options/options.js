@@ -72,6 +72,9 @@ function renderStatus(status) {
   show($('config-warning'), !status.configReady);
   show($('login-block'), status.configReady && !status.hasPhrase);
   show($('status-block'), status.hasPhrase);
+  // Карточка «Устройства» (v0.2.6, §8.9): только при фразе И конфиге —
+  // список читается из облака, без конфига туда ходить нечего.
+  show($('devices-block'), !!(status.hasPhrase && status.configReady));
   renderStats(status.stats);
 
   // Фраза приходит из atr:status; маскируем по умолчанию (см. §8.5 AGENTS.md)
@@ -178,11 +181,19 @@ async function onImportFile(ev) {
   }
 }
 
-/** Загрузка статуса. */
-async function refresh() {
+/** Загрузка статуса (+ список устройств, если карточка видима, §8.9). */
+async function refresh(opts = {}) {
   try {
     const status = await send({ type: 'atr:status' });
-    if (status && status.ok) renderStatus(status);
+    if (status && status.ok) {
+      renderStatus(status);
+      if (status.hasPhrase && status.configReady) {
+        await loadDevices(opts.focusOwn);
+      } else {
+        show($('devices-error'), false);
+        devicesFocusOwn = false; // фразы нет — автофокус неактуален
+      }
+    }
   } catch (err) {
     console.error('[ATR options] статус недоступен:', err);
   }
@@ -226,6 +237,15 @@ async function onLogin() {
     show($('confirm-label'), false);
     show($('wipe-done'), false); // новый вход — итог вайпа неактуален
     await refresh();
+    // Регистрация устройства (v0.2.6, §8.9): первый sync от этой фразы —
+    // иначе своё устройство в списке не появится до визита на author.today.
+    try {
+      await send({ type: 'atr:sync:sync', entries: {} });
+    } catch (_) {
+      /* сети нет — устройство зарегистрируется при следующем посещении сайта */
+    }
+    // Автофокус переименования: имя устройству задаётся при первом входе.
+    await loadDevices(true);
   } catch (err) {
     errorBox.textContent = String(err && err.message ? err.message : err);
     show(errorBox, true);
@@ -278,6 +298,7 @@ async function onCopyPhrase() {
 async function onLogout() {
   await send({ type: 'atr:phrase:clear' });
   generatedThisSession = false;
+  devicesFocusOwn = false; // автофокус своей строки без фразы не нужен
   showRotateForm(false); // форма ротации без фразы неактуальна
   await refresh();
 }
@@ -411,6 +432,255 @@ async function onWipeDo() {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Удалить всё безвозвратно';
+  }
+}
+
+// --- Устройства (v0.2.6, §8.9): список, переименование, удаление ------------
+
+let ownDeviceId = null; // deviceId этого браузера (at­r:devices:list → ownId)
+let devicesFocusOwn = false; // автофокус своей строки после первого входа
+
+/** Последняя активность/регистрация устройства — человекочитаемо. */
+function formatDeviceMeta(d) {
+  if (d.lastSeen) return 'Активно: ' + formatStatTime(new Date(d.lastSeen).toISOString());
+  if (d.createdAt) return 'Добавлено: ' + formatStatTime(new Date(d.createdAt).toISOString());
+  return '';
+}
+
+/**
+ * Загрузка списка (atr:devices:list → SW → облако). focusOwn — открыть
+ * inline-переименование СВОЕЙ строки, когда она появится (имя задаётся
+ * при первом входе; флаг потребляется только при показе — устройство
+ * может зарегистрироваться позже, после визита на author.today).
+ */
+async function loadDevices(focusOwn) {
+  if (focusOwn) devicesFocusOwn = true;
+  const listEl = $('devices-list');
+  const errorBox = $('devices-error');
+  listEl.textContent = 'Загрузка…';
+  show(errorBox, false);
+  let res;
+  try {
+    res = await send({ type: 'atr:devices:list' });
+  } catch (err) {
+    res = { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+  // Тихий сброс (§8.9): SW уже удалил фразу/статусы — UI в состояние
+  // «как после установки», плашка в #wipe-block (карточка он виден всегда).
+  if (res && res.reset) {
+    await applyRemoteResetNotice();
+    return;
+  }
+  if (!res || !res.ok) {
+    listEl.textContent = '';
+    errorBox.textContent = (res && res.error) || 'Список устройств недоступен';
+    show(errorBox, true);
+    return;
+  }
+  ownDeviceId = res.ownId || null;
+  renderDevices(res.devices || []);
+}
+
+/** Плашка после тихого сброса: состояние фразы сброшено, итог виден. */
+async function applyRemoteResetNotice() {
+  currentPhrase = null;
+  phraseVisible = false;
+  generatedThisSession = false;
+  rotateGenerated = false;
+  devicesFocusOwn = false;
+  showRotateForm(false);
+  showWipeForm(false);
+  await refresh(); // фразы нет → login-block, карточка «Устройства» скрыта
+  await renderBackupStatus(); // снапшот удалён → «Нет данных для экспорта»
+  $('wipe-done-text').textContent =
+    'Это устройство удалено из списка другим устройством: кодовая фраза и ' +
+    'локальные отметки на нём удалены (как после установки). Облачные ' +
+    'отметки не тронуты.';
+  show($('wipe-done'), true);
+}
+
+/** Отрисовка строк списка; автофокус своей строки — после первого входа. */
+function renderDevices(devices) {
+  const listEl = $('devices-list');
+  listEl.textContent = '';
+  if (!devices.length) {
+    const p = document.createElement('p');
+    p.className = 'muted';
+    p.textContent =
+      'Пока пусто: своё устройство появится здесь после первого ' +
+      'посещения author.today с этой фразой.';
+    listEl.appendChild(p);
+    return; // devicesFocusOwn сохраняется — дождёмся регистрации устройства
+  }
+  const rows = new Map();
+  for (const d of devices) {
+    const row = buildDeviceRow(d);
+    rows.set(d.id, row);
+    listEl.appendChild(row);
+  }
+  if (devicesFocusOwn && ownDeviceId && rows.has(ownDeviceId)) {
+    devicesFocusOwn = false;
+    startRename(rows.get(ownDeviceId), devices.find((d) => d.id === ownDeviceId));
+  }
+}
+
+/** Строка списка: имя (+бейдж «Это устройство»), мета, кнопки действий. */
+function buildDeviceRow(device) {
+  const row = document.createElement('div');
+  row.className = 'device-row';
+  row.dataset.id = device.id;
+
+  const info = document.createElement('div');
+  info.className = 'device-info';
+  const title = document.createElement('div');
+  title.className = 'device-title';
+  const nameEl = document.createElement('span');
+  nameEl.className = 'device-name';
+  nameEl.textContent = device.name;
+  title.appendChild(nameEl);
+  if (device.id === ownDeviceId) {
+    const badge = document.createElement('span');
+    badge.className = 'device-badge';
+    badge.textContent = 'Это устройство';
+    title.appendChild(badge);
+  }
+  info.appendChild(title);
+  const meta = document.createElement('span');
+  meta.className = 'device-meta muted';
+  meta.textContent = formatDeviceMeta(device);
+  if (meta.textContent) info.appendChild(meta);
+  row.appendChild(info);
+
+  const actions = document.createElement('div');
+  actions.className = 'device-actions';
+  fillDeviceActions(actions, row, device);
+  row.appendChild(actions);
+  return row;
+}
+
+/**
+ * Кнопки строки: «Переименовать» всегда; «Удалить» — ТОЛЬКО для чужого
+ * устройства (своё удалить нельзя — решение пользователя, §8.9).
+ */
+function fillDeviceActions(actions, row, device) {
+  actions.textContent = '';
+  const btnRename = document.createElement('button');
+  btnRename.type = 'button';
+  btnRename.textContent = 'Переименовать';
+  btnRename.addEventListener('click', () => startRename(row, device));
+  actions.appendChild(btnRename);
+  if (device.id !== ownDeviceId) {
+    const btnRemove = document.createElement('button');
+    btnRemove.type = 'button';
+    btnRemove.className = 'danger';
+    btnRemove.textContent = 'Удалить';
+    btnRemove.addEventListener('click', () => removeDevice(device, btnRemove, actions, row));
+    actions.appendChild(btnRemove);
+  }
+}
+
+/** Inline-переименование: input вместо кнопок, Enter/«Сохранить» → SW. */
+function startRename(row, device) {
+  const actions = row.querySelector('.device-actions');
+  if (!actions || actions.dataset.renaming === '1') return;
+  actions.dataset.renaming = '1';
+  actions.textContent = '';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.maxLength = 40;
+  input.className = 'device-rename-input';
+  input.value = device.name;
+
+  const btnOk = document.createElement('button');
+  btnOk.type = 'button';
+  btnOk.className = 'primary';
+  btnOk.textContent = 'Сохранить';
+  const btnCancel = document.createElement('button');
+  btnCancel.type = 'button';
+  btnCancel.textContent = 'Отмена';
+  const err = document.createElement('p');
+  err.className = 'error hidden';
+
+  const cancel = () => {
+    delete actions.dataset.renaming;
+    fillDeviceActions(actions, row, device);
+  };
+  const save = async () => {
+    const name = input.value.trim().replace(/\s+/g, ' ');
+    if (!name) {
+      err.textContent = 'Имя устройства не может быть пустым';
+      show(err, true);
+      return;
+    }
+    btnOk.disabled = true;
+    btnCancel.disabled = true;
+    try {
+      const res = await send({ type: 'atr:devices:rename', deviceId: device.id, name });
+      if (!res || !res.ok) {
+        err.textContent = (res && res.error) || 'Не удалось переименовать устройство';
+        show(err, true);
+        btnOk.disabled = false;
+        btnCancel.disabled = false;
+        return;
+      }
+      await loadDevices(false); // свежий список с новым именем
+    } catch (e) {
+      err.textContent = String(e && e.message ? e.message : e);
+      show(err, true);
+      btnOk.disabled = false;
+      btnCancel.disabled = false;
+    }
+  };
+
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      save();
+    } else if (ev.key === 'Escape') {
+      ev.preventDefault();
+      cancel();
+    }
+  });
+  btnOk.addEventListener('click', save);
+  btnCancel.addEventListener('click', cancel);
+
+  actions.append(input, btnOk, btnCancel, err);
+  input.focus();
+  input.select();
+}
+
+/** Удаление чужого устройства: два шага («Удалить» → «Удалить — точно?»). */
+async function removeDevice(device, btn, actions, row) {
+  if (btn.dataset.confirm !== '1') {
+    btn.dataset.confirm = '1';
+    btn.textContent = 'Удалить — точно?';
+    // Подтверждение само сбрасывается через 5 с, чтобы кнопка не «залипла».
+    setTimeout(() => {
+      if (btn.dataset.confirm === '1' && document.contains(btn)) {
+        btn.dataset.confirm = '0';
+        btn.textContent = 'Удалить';
+      }
+    }, 5000);
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = 'Удаляем…';
+  const fail = (message) => {
+    const errorBox = $('devices-error');
+    errorBox.textContent = message;
+    show(errorBox, true);
+    fillDeviceActions(actions, row, device); // кнопки заново, confirm сброшен
+  };
+  try {
+    const res = await send({ type: 'atr:devices:remove', deviceId: device.id });
+    if (!res || !res.ok) {
+      fail((res && res.error) || 'Не удалось удалить устройство');
+      return;
+    }
+    await loadDevices(false); // список без удалённого устройства
+  } catch (e) {
+    fail(String(e && e.message ? e.message : e));
   }
 }
 

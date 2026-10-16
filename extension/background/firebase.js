@@ -13,7 +13,14 @@
  *     updatedAt: int   — открыто (для слияния LWW на клиенте),
  *     v, iv, ct: str    — AES-GCM шифротекст отметки (см. shared/phrase.js).
  *   }
- * Правила БД открытые — контент зашифрован ключом от кодовой фразы.
+ *   users/{userId}/devices/{deviceId} = {           // v0.2.6, §8.9
+ *     name, platform: str — имя и «браузер · ОС» (открыто, не шифруется),
+ *     createdAt, lastSeen: int — epoch_ms,
+ *     deleted: 1 — пометка «удалено» (увидев её своё устройство, сбрасывает
+ *                  локальные данные — тихий сброс §8.9).
+ *   }
+ * Правила БД открытые — контент зашифрован ключом от кодовой фразы
+ * (для devices правила должны включать одноранговый узел — §8.2).
  *
  * Конфиг подтягивается через fetch(chrome.runtime.getURL('background/config.json'))
  * (файл генерируется из .env командой `npm run config`, в .gitignore). Если файла
@@ -62,6 +69,54 @@ export function initFirebase(config = {}) {
 
   /** Узел отметок пользователя: {root}/users/{uid}/marks.json */
   const marksUrl = (userId) => `${root}/users/${userId}/marks.json`;
+
+  /** Узел списка устройств пользователя: {root}/users/{uid}/devices.json */
+  const devicesUrl = (userId) => `${root}/users/${userId}/devices.json`;
+
+  /** Один узел устройства: {root}/users/{uid}/devices/{deviceId}.json */
+  const deviceUrl = (userId, deviceId) => `${root}/users/${userId}/devices/${deviceId}.json`;
+
+  /**
+   * Список устройств (v0.2.6, §8.9): {deviceId: {name, platform, createdAt,
+   * lastSeen, deleted?}}. Пустой узел → {}. Бросает httpError('devices-get')
+   * при сбое (старые правила БД без узла devices → 403) — в sync такой сбой
+   * гасится, чтобы синхронизация отметок продолжала работать как раньше.
+   */
+  async function getDevices(userId) {
+    const res = await fetch(devicesUrl(userId), { method: 'GET' });
+    if (!res.ok) throw httpError('devices-get', res);
+    const body = await res.json();
+    if (!body || typeof body !== 'object') return {};
+    const out = {};
+    for (const [id, val] of Object.entries(body)) {
+      if (id && val && typeof val === 'object') out[id] = val;
+    }
+    return out;
+  }
+
+  /**
+   * Запись одного устройства: PATCH ПО ПУТИ узла — RTDB мержит переданные
+   * поля в существующий узел (platform/createdAt/`deleted` не затираются
+   * частичным {name} или {lastSeen}). Несуществующее устройство создаётся.
+   */
+  async function putDevice(userId, deviceId, data) {
+    const res = await fetch(deviceUrl(userId, deviceId), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    if (!res.ok) throw httpError('devices-put', res);
+  }
+
+  /**
+   * Удаление узла устройства (не «пометка deleted» — именно узла).
+   * Используется только для самоочистки ПОСЛЕ тихого сброса (§8.9) и вайпа.
+   * Идемпотентно: несуществующий узел — 200.
+   */
+  async function deleteDevice(userId, deviceId) {
+    const res = await fetch(deviceUrl(userId, deviceId), { method: 'DELETE' });
+    if (!res.ok) throw httpError('devices-delete', res);
+  }
 
   /**
    * Pull: все отметки пользователя из облака → [{workId, updatedAt, ...iv/ct}].
@@ -128,6 +183,14 @@ export function initFirebase(config = {}) {
   async function clearCloud(userId) {
     const res = await fetch(marksUrl(userId), { method: 'DELETE' });
     if (!res.ok) throw httpError('wipe-cloud', res);
+    // Список устройств — вторичные данные: чистим best-effort, чтобы старые
+    // правила БД (без узла devices, 403) не ломали вайп отметок.
+    try {
+      const r2 = await fetch(devicesUrl(userId), { method: 'DELETE' });
+      if (!r2.ok) console.warn('[ATR] вайп: узел devices не удалён (HTTP ' + r2.status + ')');
+    } catch (err) {
+      console.warn('[ATR] вайп: узел devices не удалён:', err && err.message);
+    }
   }
 
   /**
@@ -150,16 +213,37 @@ export function initFirebase(config = {}) {
    * @param {string} userId — hex hash фразы (путь в БД)
    * @param {string} phrase — нормализованная кодовая фраза (ключ шифрования)
    * @param {Object} localEntries — локальный срез {wid: {m, t}} из content
-   * @returns {Promise<{pull: Object, pushed: number, skipped: number, gc: string[]}>}
+   * @param {string} [deviceId] — id этого устройства (для детекта пометки
+   *   «удалено», v0.2.6 §8.9; без него детект невозможен)
+   * @returns {Promise<{pull: Object, pushed: number, skipped: number, gc: string[],
+   *   devices: (Object|null), reset?: boolean}>}
    *   pull — облачные записи НОВЕЕ локальных (расшифрованы, готовы к слиянию),
    *   pushed — сколько локальных записей ушло в облако,
    *   skipped — сколько облачных записей не расшифровались (чужая фраза/битость),
-   *   gc — workId, которые content обязан жёстко удалить локально (applyGc)
+   *   gc — workId, которые content обязан жёстко удалить локально (applyGc),
+   *   devices — список устройств (null — недоступен, старые правила БД),
+   *   reset — устройство удалено из списка: push/GC НЕ выполнялись,
+   *   SW обязан снять фразу и локальные данные (§8.9).
    */
-  async function sync(userId, phrase, localEntries) {
+  async function sync(userId, phrase, localEntries, deviceId) {
     const key = await getKeyForPhrase(phrase);
     const cutoff = Date.now() - GC_TOMBSTONE_MS;
-    const remoteDocs = await pullDocs(userId);
+    // Отметки и устройства — параллельно, без добавочной сетевой задержки.
+    // Ошибка devices не должна ломать синхронизацию: гасим → null →
+    // детект флага и регистрация просто не работают (старые правила БД).
+    const [remoteDocs, devices] = await Promise.all([
+      pullDocs(userId),
+      getDevices(userId).catch((err) => {
+        console.warn('[ATR] список устройств недоступен (правила БД?):', err.message);
+        return null;
+      })
+    ]);
+
+    // Тихий сброс (v0.2.6, §8.9): другое устройство пометило нас как
+    // удалённое (deleted: 1) — НЕ пушим и не гоняем GC, возвращаем reset.
+    if (devices && deviceId && devices[deviceId] && devices[deviceId].deleted === 1) {
+      return { pull: {}, pushed: 0, skipped: 0, gc: [], devices, reset: true };
+    }
 
     const pull = {};
     const gcSet = new Set();
@@ -224,7 +308,7 @@ export function initFirebase(config = {}) {
     //    согласованы; локальная версия новее или равна).
     for (const doc of toPush) delete pull[doc.workId];
 
-    return { pull, pushed: toPush.length, skipped, gc };
+    return { pull, pushed: toPush.length, skipped, gc, devices };
   }
 
   /**
@@ -313,6 +397,26 @@ export function initFirebase(config = {}) {
     if (oldUserId !== newUserId) {
       const res = await fetch(marksUrl(oldUserId), { method: 'DELETE' });
       if (!res.ok) throw httpError('rotate-delete', res);
+
+      // Перенос списка устройств на новый userId (v0.2.6, §8.9) — вторичные
+      // данные: сбой НЕ проваливает ротацию (устройства дозапишут себя сами
+      // при следующем sync — регистрация видит отсутствие записи). Старые
+      // правила БД (без devices) → 403 → просто пропускаем.
+      try {
+        const oldDevices = await getDevices(oldUserId);
+        if (Object.keys(oldDevices).length) {
+          const r2 = await fetch(devicesUrl(newUserId), {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(oldDevices)
+          });
+          if (!r2.ok) throw httpError('rotate-devices', r2);
+          const r3 = await fetch(devicesUrl(oldUserId), { method: 'DELETE' });
+          if (!r3.ok) throw httpError('rotate-devices-delete', r3);
+        }
+      } catch (err) {
+        console.warn('[ATR] ротация: список устройств не перенесён:', err.message);
+      }
     }
 
     return { migrated: merged.size, skipped };
@@ -330,5 +434,5 @@ export function initFirebase(config = {}) {
     return err;
   }
 
-  return { isReady, sync, pullDocs, rotate, clearCloud };
+  return { isReady, sync, pullDocs, rotate, clearCloud, getDevices, putDevice, deleteDevice };
 }

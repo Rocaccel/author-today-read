@@ -185,3 +185,76 @@ dt {
 dd {
   margin: 2px 0 0;
 }
+
+/* Список устройств (v0.2.6, §8.9) */
+.device-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  border: 1px solid #e0e4e7;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-top: 8px;
+}
+
+.device-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.device-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.device-name {
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.device-badge {
+  padding: 0 8px;
+  border-radius: 999px;
+  background: #e3f0e7;
+  color: #2e7d4f;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.device-meta {
+  font-size: 12px;
+}
+
+.device-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.device-actions input[type="text"] {
+  flex: 1;
+  min-width: 150px;
+  padding: 6px 8px;
+  border: 1px solid #cfd8dc;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.device-actions input[type="text"]:focus {
+  outline: 2px solid #4582af;
+  outline-offset: 1px;
+  border-color: transparent;
+}
+
+.device-actions .error {
+  flex-basis: 100%;
+  margin: 0;
+}
