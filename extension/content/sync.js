@@ -36,6 +36,12 @@
   // и сразу синхронизируются, не дожидаясь фокуса/перезагрузки страницы.
   const PHRASE_KEY = 'atr.sync.phrase';
 
+  // Полный вайп (v0.2.6): options удалил всю информацию — флаг просит content
+  // стереть localStorage страницы (паттерн pendingImport: применяется и
+  // удаляется; в открытых вкладках срабатывает сразу по onChanged).
+  const WIPE_KEY = 'atr.sync.wipePending';
+  let wipeInFlight = false;
+
   // Backoff для ретраев при ошибке сети/правил (v0.2.1):
   // 5 с → 15 с → 1 мин → 5 мин → 15 мин (потолок, дальше каждые 15 мин).
   // Цепочка живёт, пока открыта вкладка; данные всегда лежат в localStorage,
@@ -186,6 +192,32 @@
     }, PUSH_DEBOUNCE_MS);
   }
 
+  /**
+   * Применить полный вайп (v0.2.6): стереть localStorage страницы
+   * (storage.wipeAll) и удалить флаг. Идемпотентно (in-flight + удалённый
+   * ключ). Вызывается из init() ДО первого syncNow и по
+   * chrome.storage.onChanged (открытые вкладки чистятся сразу).
+   */
+  async function applyWipePending() {
+    if (wipeInFlight) return;
+    if (!isSupported() || !chrome.storage || !chrome.storage.local) return;
+    wipeInFlight = true;
+    try {
+      const data = await chrome.storage.local.get(WIPE_KEY);
+      if (!data || !data[WIPE_KEY]) return;
+      if (ATR.storage && ATR.storage.wipeAll) ATR.storage.wipeAll();
+      await chrome.storage.local.remove(WIPE_KEY);
+      // Фраза уже удалена — sync вернёт skip БЕЗ сетевого запроса, но
+      // обновит кэш статистики нулями (иначе счётчик мог бы остаться от
+      // старых отметок: поздний ретрай другой вкладки записал бы их обратно).
+      syncNow();
+    } catch (err) {
+      console.debug('[ATR] вайп не применён:', err && err.message);
+    } finally {
+      wipeInFlight = false;
+    }
+  }
+
   /** Окно в фокусе: подтянуть изменения с других устройств. */
   function onWindowFocus() {
     const now = Date.now();
@@ -209,7 +241,10 @@
    *     слушатель chrome.storage.onChanged для уже открытых вкладок;
    *  6) сохранение/смена фразы в Параметрах (v0.2.6): ветка того же
    *     слушателя по ключу atr.sync.phrase → немедленный syncNow()
-   *     (вкладка подтягивает отметки сразу после входа и после ротации).
+   *     (вкладка подтягивает отметки сразу после входа и после ротации);
+   *  7) полный вайп (v0.2.6): флаг atr.sync.wipePending → стирание
+   *     localStorage (applyWipePending) — при загрузке ДО первого syncNow
+   *     и сразу по onChanged в открытых вкладках.
    */
   function init() {
     if (!isSupported()) return;
@@ -228,13 +263,19 @@
         // sync всё равно skip'нулся бы, не порождаем лишний запрос.
         const p = changes[PHRASE_KEY];
         if (p && p.newValue) syncNow();
+        // Вайп: localStorage стираем немедленно, не дожидаясь визита.
+        const w = changes[WIPE_KEY];
+        if (w && w.newValue) applyWipePending();
       });
     }
 
-    applyPendingImport().finally(() => syncNow());
+    // Порядок критичен: импорт → вайп → первый syncNow (вайп строго ДО sync).
+    applyPendingImport()
+      .finally(() => applyWipePending())
+      .finally(() => syncNow());
   }
 
-  ATR.sync = { isSupported, init, syncNow, scheduleRetry, resetRetry, applyPendingImport };
+  ATR.sync = { isSupported, init, syncNow, scheduleRetry, resetRetry, applyPendingImport, applyWipePending };
   // Тестовый хук: укорачивает интервалы backoff, чтобы тесты не ждали секунды.
   ATR.sync.__setRetryDelays = (arr) => {
     retryDelays = Array.isArray(arr) && arr.length ? arr.slice() : [5000];

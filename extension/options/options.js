@@ -224,6 +224,7 @@ async function onLogin() {
     generatedThisSession = false;
     $('phrase-input').value = '';
     show($('confirm-label'), false);
+    show($('wipe-done'), false); // новый вход — итог вайпа неактуален
     await refresh();
   } catch (err) {
     errorBox.textContent = String(err && err.message ? err.message : err);
@@ -336,6 +337,7 @@ async function onRotateDo() {
     }
     showRotateForm(false); // включая сброс полей/подтверждения
     await refresh(); // новый userId в статусе
+    show($('wipe-done'), false); // ротация успешна — итог вайпа неактуален
     show($('rotate-done'), true);
   } catch (err) {
     errorBox.textContent = String(err && err.message ? err.message : err);
@@ -343,6 +345,72 @@ async function onRotateDo() {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Сменить и войти';
+  }
+}
+
+// --- Полный вайп (v0.2.6): «Удалить все данные» -----------------------------
+
+/** Текст итога: зависит от того, было ли доступно облако. */
+function wipeDoneText(res) {
+  if (res.cloudDeleted) {
+    return (
+      'Все данные удалены: облачные отметки, отметки этого браузера, кодовая ' +
+      'фраза и статусы. На других устройствах с этой фразой сделайте то же ' +
+      'самое — иначе их отметки при следующей синхронизации снова уйдут в облако.'
+    );
+  }
+  if (res.reason === 'no-config') {
+    return 'Локальные данные и статусы удалены. Облако не тронуто: синхронизация не настроена (нет конфига) — доступа к нему нет.';
+  }
+  if (res.reason === 'no-phrase') {
+    return 'Локальные данные и статусы удалены. Облако не тронуто: кодовая фраза неизвестна — без неё к нему нет доступа.';
+  }
+  return 'Данные удалены.';
+}
+
+/** Открыть/закрыть форму вайпа; открытие сбрасывает чекбокс и ошибки. */
+function showWipeForm(open) {
+  show($('wipe-form'), open);
+  $('wipe-confirm-check').checked = false;
+  show($('wipe-error'), false);
+  if (open) show($('wipe-done'), false);
+}
+
+/** Полный вайп: чекбокс-гейт → atr:data:wipe → итог + обновление UI. */
+async function onWipeDo() {
+  const errorBox = $('wipe-error');
+  if (!$('wipe-confirm-check').checked) {
+    errorBox.textContent = 'Сначала подтвердите, что понимаете: данные удаляются безвозвратно';
+    show(errorBox, true);
+    return;
+  }
+  const btn = $('btn-wipe-do');
+  btn.disabled = true;
+  btn.textContent = 'Удаляем…';
+  try {
+    const res = await send({ type: 'atr:data:wipe' });
+    if (!res || !res.ok) {
+      errorBox.textContent = (res && res.error) || 'Не удалось удалить данные';
+      show(errorBox, true);
+      return;
+    }
+    // Успех: форма закрыта, состояние фразы сброшено, всё перечитано.
+    showWipeForm(false);
+    currentPhrase = null;
+    phraseVisible = false;
+    generatedThisSession = false;
+    rotateGenerated = false;
+    showRotateForm(false);
+    await refresh(); // фразы нет → login-block; статусы и статистика нулевые
+    await renderBackupStatus(); // снапшот удалён → «Нет данных для экспорта»
+    $('wipe-done-text').textContent = wipeDoneText(res);
+    show($('wipe-done'), true);
+  } catch (err) {
+    errorBox.textContent = String(err && err.message ? err.message : err);
+    show(errorBox, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Удалить всё безвозвратно';
   }
 }
 
@@ -356,6 +424,12 @@ $('btn-rotate').addEventListener('click', () => showRotateForm(true));
 $('btn-rotate-generate').addEventListener('click', onRotateGenerate);
 $('btn-rotate-do').addEventListener('click', onRotateDo);
 $('btn-rotate-cancel').addEventListener('click', () => showRotateForm(false));
+$('btn-wipe').addEventListener('click', () => showWipeForm(true));
+$('btn-wipe-do').addEventListener('click', onWipeDo);
+$('btn-wipe-cancel').addEventListener('click', () => showWipeForm(false));
+$('btn-wipe-open-site').addEventListener('click', () => {
+  chrome.tabs.create({ url: 'https://author.today/' });
+});
 $('btn-export').addEventListener('click', onExport);
 $('btn-import').addEventListener('click', () => $('import-file').click());
 $('import-file').addEventListener('change', onImportFile);

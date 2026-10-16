@@ -280,7 +280,10 @@ pjax-ссылки в своём `.panel-actions` (внутри `.panel-heading`)
   **`atr.sync.snapshot`** (`{entries, at}` — последний срез от content,
   v0.2.4; данные для «Экспорт JSON», пишется там же в `handleSync`),
   **`atr.sync.pendingImport`** (санитизованные entries из файла, v0.2.4;
-  пишет options, применяет и удаляет content, см. §8.5).
+  пишет options, применяет и удаляет content, см. §8.5),
+  **`atr.sync.wipePending`** (timestamp старта полного вайпа, v0.2.6;
+  пишет options/SW после успешного удаления облака, применяет и удаляет
+  content — стирает localStorage страницы, см. §8.8).
 - Фраза хранится ТОЛЬКО здесь (читает только расширение); в page localStorage
   не попадает — сайт author.today её не видит.
 - Требует `"permissions": ["storage"]` в manifest.
@@ -377,6 +380,7 @@ author-today-read/
 | `toggle(workId, mark)` | `(string, "read"\|"skip") → "read"\|"skip"\|null` | семантика §1.1; после изменения шлёт `document` событие `'atr:changed'` с `{detail:{workId}}`                           |
 | `mergeRemote(remote)`  | `(Object) → string[]`                             | LWW-слияние облачных данных: принимает запись, если её `t` **больше** локального; возвращает список изменившихся workId |
 | `applyGc(wids)`        | `(string[]) → string[]`                           | **GC (v0.2.1):** жёсткое удаление записей БЕЗ томбстоуна (иначе цикл); список приходит ТОЛЬКО из `res.gc` background; шлёт `document` событие `'atr:gc'` `{detail:{wids}}` (слушает dom.js для перерисовки; `atr:changed` НЕ шлём — пушить после gc нечего) |
+| `wipeAll()`            | `() → string[]`                                   | **Полный вайп (v0.2.6, §8.8):** жёсткое удаление `atr.v2.marks` + `atr.v1.marks` (без томбстоунов) → возвращает снятые workId → шлёт `document` событие `'atr:wipe'` `{detail:{wids}}` (слушает dom.js: снять pref `atr.ui.hideMarked`, обновить тумблер, перерисовать; **`atr:changed` НЕ шлём** — пушить нечего, фраза уже удалена) |
 
 Константы: `ATR.storage.KEY_V2 = 'atr.v2.marks'`, `KEY_V1 = 'atr.v1.marks'`,
 `MARK_READ = 'read'`, `MARK_SKIP = 'skip'`.
@@ -386,9 +390,10 @@ author-today-read/
 | функция         | что делает                                                                                                                                                                                                                                                                                                |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `isSupported()` | есть ли `chrome.runtime.sendMessage` (в тестах может отсутствовать)                                                                                                                                                                                                                                       |
-| `init()`        | подписка на `'atr:changed'` (debounce push 1.5 с), `focus` окна (pull не чаще 30 с), **`online` окна (немедленный повтор после восстановления сети, v0.2.1)** + первый `syncNow()` при загрузке страницы (**после применения отложенного импорта**, v0.2.4) + слушатель `chrome.storage.onChanged`: ветка `atr.sync.pendingImport` (v0.2.4) и **ветка `atr.sync.phrase` (v0.2.6): сохранение/смена фразы в options (вход, ротация) → немедленный `syncNow()`; `newValue: undefined` (выход) → ничего** |
+| `init()`        | подписка на `'atr:changed'` (debounce push 1.5 с), `focus` окна (pull не чаще 30 с), **`online` окна (немедленный повтор после восстановления сети, v0.2.1)** + первый `syncNow()` при загрузке страницы (**после применения отложенного импорта, затем вайпа** — цепочка `applyPendingImport → applyWipePending → syncNow`, v0.2.4/0.2.6) + слушатель `chrome.storage.onChanged`: ветка `atr.sync.pendingImport` (v0.2.4), **ветка `atr.sync.phrase` (v0.2.6): сохранение/смена фразы в options (вход, ротация) → немедленный `syncNow()`; `newValue: undefined` (выход) → ничего** и **ветка `atr.sync.wipePending` (v0.2.6): вкладка немедленно стирает свой localStorage (`applyWipePending`)** |
 | `syncNow()`     | один round-trip: шлёт `{type:'atr:sync:sync', entries: getAll()}` → принимает `res.pull` → `storage.mergeRemote()` → `ui.renderAll(wid)` (БЕЗ события `atr:changed`, чтобы не зациклить push) + `storage.applyGc(res.gc)` (v0.2.1). Одновременно только один запрос (inFlight + pending). Исходы: **ok** → сброс backoff; **skip** (нет конфига/фразы) → не ретраится; **fail** (сеть/SW) → `scheduleRetry()`; **retry-soon** (v0.2.6: SW ответил guard'ом ротации «идёт смена кодовой фразы» — storage-событие обогнало снятие флага) → `schedulePush()` (повтор ~1.5 с, НЕ backoff) |
 | `applyPendingImport()` | **Импорт из файла (v0.2.4):** читает `atr.sync.pendingImport` из `chrome.storage.local` → `storage.mergeRemote()` (LWW по `t`: более новые локальные не затираются, томбстоуны переносятся) → рендер изменившихся → удаление ключа → `syncNow()` (push). Идемпотентно (in-flight + удалённый ключ); работает и без `chrome.storage` в стабах (guard) |
+| `applyWipePending()`   | **Полный вайп (v0.2.6, §8.8):** читает `atr.sync.wipePending` из `chrome.storage.local` → `storage.wipeAll()` (стирание localStorage + событие `'atr:wipe'`) → удаление ключа → `syncNow()` (без сети: фразы уже нет → skip, но кэш `atr.sync.stats` обнуляется нулями). Идемпотентно (in-flight `wipeInFlight` + удалённый ключ); работает и без `chrome.storage` в стабах (guard) |
 | `scheduleRetry()` / `resetRetry()` | **Ретраи (v0.2.1):** backoff `5с → 15с → 1м → 5м → 15м` (потолок, дальше каждые 15 м; таблица `retryDelays`, тестовый хук `__setRetryDelays`). Один ожидающий таймер (идемпотентно); успех обнуляет. Цепочка живёт, пока открыта вкладка — данные всегда в localStorage, смерть вкладки не теряет их |
 
 **`shared/phrase.js` (ES-модуль, options + background)**
@@ -412,6 +417,7 @@ author-today-read/
 | `__setConfigForTest(config)`    | тестовый хук (npm test): подменяет кэш `configPromise` напрямую, минуя fetch config.json (прецедент — `__setRetryDelays` в content/sync.js; нужен, потому что `loadConfig` кэширует `ready:false` после [14]) |
 | `initFirebase(config)` → клиент | `isReady()` (databaseURL), `pullDocs(userId)` (GET `{db}/users/{uid}/marks.json`; пустое дерево → `null` → `[]`), `sync(userId, phrase, localEntries)` → **`{pull, pushed, skipped, gc}`**: расшифровывает облако, пушит локальное новее облака одним `PATCH`, возвращает облачное новее локального + список `gc` протухших томбстоунов (v0.2.1, §8); `deleteDocs(userId, wids)` — PATCH с `{wid: null}` (удаление узлов); **`rotate(oldUserId, oldPhrase, newUserId, newPhrase, snapshotEntries)`** (v0.2.6, §8.7) → `{migrated, skipped}`: LWW-слияние (A — старый путь старым ключом ∪ B — снапшот `atr.sync.snapshot` ∪ C — новый путь новым ключом, идемпотентность повтора) → перешифровка → **один PATCH** на новый путь → **только после успеха PATCH** `DELETE users/{oldUid}/marks.json` (узел `marks`, НЕ `users/{uid}` — права `.write` только на подузел §8.2); сбой на любом шаге = ничего не изменилось; томбстоуны переносятся, GC не применяется. Ошибки HTTP — исключение со свойством `status` |
 | `GC_TOMBSTONE_MS` (экспорт)     | `90 * 24 * 60 * 60 * 1000` — срок жизни томбстоунов (v0.2.1); живые отметки GC не трогает никогда                                                                                                                                                                                                                                                             |
+| `clearCloud(userId)`           | **Полный вайп (v0.2.6, §8.8):** один `DELETE {db}/users/{uid}/marks.json` — удаляет узел `marks` целиком (права `.write` только на подузел §8.2, как в `rotate`); идемпотентен (нет узла → ok); HTTP-ошибка → исключение `wipe-cloud: HTTP …` — вызывающий НЕ трогает локальные данные |
 
 **`background/service-worker.js` (роутер `chrome.runtime.onMessage`)**
 
@@ -422,6 +428,7 @@ author-today-read/
 | `atr:phrase:clear` | `→ {ok}` (удаляет фразу/userId/ошибку)                                                                                                                                                                                                     |
 | `atr:phrase:rotate` | `{phrase}` (v0.2.6) → `rotating=true` синхронно до первого await → drain незавершённых sync (новые `atr:sync:sync` в это время отклоняются guard'ом до инкремента счётчика) → проверки: конфиг (`ready`), есть текущая фраза, валидность новой, не совпадает ли с текущей → `firebase.rotate(...)` → **ТОЛЬКО после успеха** сохранение новой фразы/userId/`lastSync` в `chrome.storage.local` → `{ok, userId, migrated, skipped}` / `{ok:false, error}` (при сбое хранилище и старый путь не тронуты — повтор безопасен) |
 | `atr:sync:sync`    | `{entries}` → **сначала кэш статистики и снапшота** (v0.2.2/0.2.4: `computeStats(entries)` → `atr.sync.stats` + `entries` → `atr.sync.snapshot`, ТОЛЬКО если `sender.tab` — options со своим `entries:{}` ничего не трогает; до проверок конфига/фразы) → полный round-trip с Realtime Database → `{ok, pull, pushed, skipped, gc}` либо `{ok:false, skip:true, reason:'config'\|'phrase'}` (не ошибка!) либо `{ok:false, error}` (сеть/правила, текст сохраняется в `atr.sync.lastError`; content ретраит с backoff, §4.2) |
+| `atr:data:wipe`     | **Полный вайп (v0.2.6, §8.8):** `opLabel='wipe'` синхронно до первого await → drain незавершённых sync (новые `atr:sync:sync` отклоняются guard'ом «идёт удаление данных») → **порядок операции:** есть конфиг? (`no-config`) → `clearCloud` при готовности и фразе (`no-phrase` — пропуск облака; сбой → `{ok:false, error}`, локальное НЕ тронуто) → удаление 7 ключей (`phrase`, `userId`, `lastSync`, `lastError`, `stats`, `snapshot`, `pendingImport`) → установка `atr.sync.wipePending` → `{ok, cloudDeleted, reason}`; catch → `lastError` + `{ok:false, error}`, флаг не ставится |
 
 `computeStats(entries)` — экспорт service-worker.js: `{read, skip, total, at}`;
 томбстоуны (`m:null`) и мусор не считаются, `total = read + skip`.
@@ -429,8 +436,8 @@ author-today-read/
 content-вкладку от options-страницы.
 
 `options/options.js` — чистый UI: `generatePhrase/validatePhrase/normalizePhrase`
-из shared + те же 5 сообщений (`atr:status`, `atr:phrase:set`, `atr:phrase:clear`,
-`atr:phrase:rotate`, `atr:sync:sync`); локальных данных не хранит.
+из shared + те же 6 сообщений (`atr:status`, `atr:phrase:set`, `atr:phrase:clear`,
+`atr:phrase:rotate`, `atr:sync:sync`, `atr:data:wipe`); локальных данных не хранит.
 
 **`shared/backup.js` (ES-модуль, только options; v0.2.4, §8.5)**
 
@@ -556,7 +563,10 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
    ([14]), бэкап JSON ([15]), тумблер «Скрыть отмечённые» ([16], v0.2.5),
    ротацию фразы ([17], v0.2.6): отказы до сети, drain/guard, миграция
    LWW + перешифровка, порядок PATCH → DELETE, сбой PATCH → повтор,
-   реакция открытой вкладки на сохранение/смену фразы (17г).
+   реакция открытой вкладки на сохранение/смену фразы (17г), и полный
+   вайп ([18], v0.2.6): no-config/no-phrase, откат при сбое DELETE,
+   guard «удаление данных», 7 ключей + флаг, content-стирание (init и
+   onChanged), событие `atr:wipe`, идемпотентность.
    Все проверки должны быть `ok`, итог «ВСЕ ТЕСТЫ ПРОЙДЕНЫ».
 1. `chrome://extensions` → режим разработчика → «Загрузить распакованное
    расширение» → папка `extension/`. Без ошибок в manifest.
@@ -640,6 +650,17 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
     фразу → те же отметки тянутся. Если вкладка author.today уже открыта —
     она подтягивает отметки сразу после смены (и после входа), без ожидания
     фокуса/перезагрузки. Автотесты — секция [17].
+25. **Вайп (v0.2.6)**: Параметры → «Удаление данных» → «Удалить все данные…»
+    → без чекбокса кнопка не срабатывает (ошибка) → чекбокс → «Удалить всё
+    безвозвратно» → плашка с итогом. Проверить: в Firebase-консоли узел
+    `users/{hash}/marks` **удалён**; `localStorage` на author.today пуст
+    (`atr.v2.marks` нет) — открытая вкладка стирается сразу (без
+    перезагрузки), тумблер «Скрыть отмечённые» сброшен; options показывает
+    login-block, статистика `0/0/0`, бэкап «Нет данных»; фраза удалена
+    («Выйти»/ротация недоступны — вход заново). Варианты: без конфига или
+    без фразы → итог «Облако не тронуто…», локальное стёрто; сбой сети →
+    ошибка в форме, фраза/отметки на месте, повтор работает. Автотесты —
+    секция [18].
 
 ---
 
@@ -672,7 +693,7 @@ ATR.storage.toggle(...) → ATR.ui.renderAll(workId)`. `stopPropagation` обя�
 
 ---
 
-## 8. Синхронизация с Firebase (v0.2.0; доработки: ретраи + GC v0.2.1, ротация фразы v0.2.6)
+## 8. Синхронизация с Firebase (v0.2.0; доработки: ретраи + GC v0.2.1, ротация и вайп v0.2.6)
 
 ### 8.1. Архитектура
 
@@ -682,7 +703,7 @@ content/storage.js (кэш v2)  atr:sync:sync   service-worker.js   GET/PATCH .j
 content/sync.js ──────────────────────────►  firebase.js  ─────────────────►  users/{uid}/marks/*
         ▲                                       │ sha256/pbkdf2/aes
         └── merge LWW (pull) ◄─────────────────┘ из chrome.storage.local
-                 options/options.js ── те же 4 сообщения ──►
+                 options/options.js ── те же 6 сообщений ──►
 ```
 
 - **Сеть только в background** (CORS расширения, `host_permissions`); content
@@ -842,6 +863,22 @@ users/{userId}/marks/{workId} → {
     нужна, когда вкладки сайта нет. Импорт синхронизируется в облако
     обычным push (нужна настроенная фраза/конфиг; без них — просто
     локальное объединение).
+- **«Удаление данных»** (v0.2.6, §8.8): карточка `#wipe-block` с muted-описанием
+  и красной кнопкой `Удалить все данные…` (`#btn-wipe`) → раскрывает скрытую
+  форму `#wipe-form`: предупреждение `alert-warning` (отметки необратимы;
+  на других устройствах с той же фразой — сделать то же самое, иначе их
+  отметки при следующей синхронизации воссоздадут облачный узел),
+  обязательный чекбокс `#wipe-confirm-check` (без него инлайн-ошибка
+  `#wipe-error`), кнопки `Удалить всё безвозвратно` (`#btn-wipe-do`) /
+  `Отмена`. Вызов → `atr:data:wipe` → при успехе: форма закрывается,
+  состояние фразы сбрасывается (`showWipeForm(false)`, выход из состояния
+  «фраза есть», `refresh()` — login-block, нулевая статистика, `renderBackupStatus()`
+  — «Нет данных для экспорта») и показывается плашка `#wipe-done` с итогом
+  `wipeDoneText()` (облако+локальное; либо «Облако не тронуто: нет конфига/фразы»)
+  и кнопкой `Открыть author.today` (`#btn-wipe-open-site`). Ошибки (в т.ч.
+  guard «идёт удаление данных», сбой DELETE) — инлайн в `#wipe-error`, кнопка
+  снова активна. Итог гасится при входе/ротации (`onLogin`/`onRotateDo`).
+  Карточка видна **всегда** (вайп локального нужен и без входа — §8.8).
 
 ### 8.6. Сценарии
 
@@ -905,6 +942,62 @@ DELETE не выполнялся; DELETE не прошёл → фраза не �
 
 **Отказ без конфига** — осознанно: включать «режим без облака» при
 компрометации нельзя (флаг-вайп «скомпрометировано» отклонён пользователем).
+
+### 8.8. Полное удаление данных — вайп (v0.2.6)
+
+Кнопка в options (§8.5) удаляет **всё**: облачные отметки (если доступно),
+отметки в localStorage этого браузера, кодовую фразу и все статусы
+расширения. Реализация: `handleDataWipe` (service-worker.js) →
+`firebase.clearCloud()` → `storage.wipeAll()` + `applyWipePending()`
+(content).
+
+**Порядок операции (критичен — при сбое ничего не тронуто):**
+
+1. `opLabel = 'wipe'` **синхронно до первого await** (общий guard с
+   ротацией): пока поднят, `handleSync` отклоняет новые `atr:sync:sync`
+   (`{ok:false, error:'идёт удаление данных'}`) — текст отличает вайп от
+   ротации. Content такой исход НЕ ретраит как `retry-soon` (там ловится
+   только строка ротации) — уйдёт обычный backoff, что верно: к моменту
+   ответа фраза уже удалена и повтор станет `skip`.
+2. **Drain**: `waitForDrain()` ждёт sync, начатых ДО вайпа (10 с → отказ).
+3. **Проверка конфига**: нет → `reason: 'no-config'`, облако пропускается
+   (удалять нечего/нет доступа), локальное чистится.
+4. **`clearCloud(userId)`** — при готовном конфиге И фразе: один
+   `DELETE users/{uid}/marks.json`; без фразы → `reason: 'no-phrase'`
+   (облако не тронуто — расшифровать/подтвердить путь нечем); сбой →
+   `{ok:false, error}` с `lastError` — **локальное НЕ тронуто**, флаг не
+   ставится, повтор безопасен.
+5. Удаление 7 ключей `chrome.storage.local`: `phrase`, `userId`,
+   `lastSync`, `lastError`, `stats`, `snapshot`, `pendingImport`.
+6. Установка **`atr.sync.wipePending`** (timestamp) — сигнал content.
+7. Возврат `{ok, cloudDeleted, reason}`; `finally { opLabel = null }`.
+
+**Применение на страницах (content/sync.js `applyWipePending`):**
+
+- два входа: цепочка `init()` (`applyPendingImport → applyWipePending →
+  syncNow`) — для вкладок, открывшихся ПОСЛЕ вайпа; и ветка
+  `chrome.storage.onChanged` по ключу — для уже открытых;
+- `storage.wipeAll()`: жёсткое удаление `atr.v2.marks` + `atr.v1.marks`
+  → событие `'atr:wipe'` `{detail:{wids}}` → dom.js: снять pref
+  `atr.ui.hideMarked`, обновить тумблер, перерисовать (`atr:changed` НЕ
+  шлём — пушить нечего);
+- удаление ключа-флага → `syncNow()`: фразы уже нет → SW ответит `skip`
+  **без сети**, но `handleSync` до проверок запишет нулевую статистику в
+  `atr.sync.stats` — кэш счётчиков обнуляется детерминированно;
+- идемпотентность: in-flight `wipeInFlight` + уже удалённый флаг (повтор
+  из onChanged — no-op).
+
+**Свойства:** локальное стирается ВСЕГДА (даже без конфига/фразы);
+облако — только когда есть конфиг и фраза; повтор после успеха —
+`{ok, cloudDeleted:false, reason:'no-phrase'}`; guard ротации работает
+параллельно (`opLabel` общий: ротация ↔ вайп не пересекаются).
+
+**Принятый риск (аналог §8.6):** вкладки author.today, НЕ получившие флаг
+(закрытые, но их localStorage ещё не стёрт? — нет: флаг хранится в
+`chrome.storage`, открытие любой вкладки применит его при загрузке).
+Реальный риск — **другие устройства**: их отметки при следующей
+синхронизации снова уйдут в облако; поэтому UI прямо предупреждает
+(§8.5), а итог предлагает открыть сайт.
 
 ---
 

@@ -148,6 +148,49 @@
         посещении author.today. Фраза и конфиг для них не нужны.
       </p>
     </section>
+
+    <!-- Полный вайп (v0.2.6): облако (если доступно) + localStorage сайта +
+         фраза/статусы. Видна ВСЕГДА: локальные отметки есть и без входа -->
+    <section id="wipe-block" class="card">
+      <h2>Удаление данных</h2>
+      <p class="muted">
+        Удалить все отметки полностью: в облаке (если настроена синхронизация),
+        в этом браузере, а также кодовую фразу и статусы расширения.
+        Действие необратимо.
+      </p>
+      <div class="row">
+        <button id="btn-wipe" type="button" class="danger">Удалить все данные…</button>
+      </div>
+
+      <div id="wipe-form" class="hidden">
+        <p class="alert-warning">
+          ⚠ Отметки исчезнут навсегда — расшифровать удалённое будет невозможно.
+          <br>Всё удалится и на других устройствах с этой же фразой: если не
+          сделать то же самое там, их локальные отметки при следующей
+          синхронизации снова уйдут в облако.
+        </p>
+        <label id="wipe-confirm-label" class="checkbox">
+          <input type="checkbox" id="wipe-confirm-check">
+          Я понимаю: данные удаляются безвозвратно
+        </label>
+        <div class="row">
+          <button id="btn-wipe-do" type="button" class="danger">Удалить всё безвозвратно</button>
+          <button id="btn-wipe-cancel" type="button">Отмена</button>
+        </div>
+        <p id="wipe-error" class="error hidden"></p>
+      </div>
+
+      <div id="wipe-done" class="hidden">
+        <p id="wipe-done-text" class="alert-warning"></p>
+        <div class="row">
+          <button id="btn-wipe-open-site" type="button" class="primary">Открыть author.today</button>
+        </div>
+        <p class="muted">
+          Если вкладка author.today не была открыта — отметки в браузере
+          сотрутся при следующем визите на сайт (кнопка выше открывает его).
+        </p>
+      </div>
+    </section>
   </main>
   <script type="module" src="options.js"></script>
 </body>

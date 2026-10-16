@@ -28,6 +28,7 @@ const K_LAST_SYNC = 'atr.sync.lastSync';
 const K_LAST_ERROR = 'atr.sync.lastError';
 const K_STATS = 'atr.sync.stats'; // {read, skip, total, at} — кэш счётчиков (v0.2.2)
 const K_SNAPSHOT = 'atr.sync.snapshot'; // {entries, at} — последний срез от content (v0.2.4, экспорт)
+const K_WIPE = 'atr.sync.wipePending'; // флаг полного вайпа (v0.2.6): content чистит localStorage
 
 /**
  * Счётчики из локального среза {wid: {m, t}} (v0.2.2).
@@ -65,11 +66,11 @@ async function getPhrase() {
   return data[K_PHRASE] || null;
 }
 
-// --- Ротация фразы (v0.2.6): окно гонки с незавершёнными sync -------------
-// `rotating=true` ставится синхронно до первого await, guard в handleSync
-// проверяет его до любого await — новый sync либо отклонён ДО инкремента
-// счётчика, либо (начатый раньше) уже посчитан и ждётся drain'ом.
-let rotating = false;
+// --- Guard ротации и вайпа (v0.2.6): окно гонки с незавершёнными sync -----
+// `opLabel='rotate'|'wipe'` ставится синхронно до первого await, guard в
+// handleSync проверяет его до любого await — новый sync либо отклонён ДО
+// инкремента счётчика, либо (начатый раньше) уже посчитан и ждётся drain'ом.
+let opLabel = null;
 let activeSyncs = 0;
 
 /** Дождаться завершения sync, начатых до ротации (или timeout, мс). */
@@ -136,7 +137,7 @@ async function handlePhraseClear() {
  * atr:phrase:rotate — ротация фразы без потери отметок (v0.2.6).
  *
  * Порядок (безопасность при сбое):
- *   1) drain незавершённых sync (флаг rotating закрывает окно гонки —
+ *   1) drain незавершённых sync (opLabel закрывает окно гонки —
  *      иначе параллельный push мог бы воскресить старый путь после DELETE);
  *   2) миграция в firebase.rotate: LWW-слияние (облако + снапшот + новый
  *      путь) → перешифровка → PATCH нового пути → DELETE старого;
@@ -145,7 +146,7 @@ async function handlePhraseClear() {
  * ротацию можно спокойно повторить.
  */
 async function handlePhraseRotate(msg) {
-  rotating = true; // синхронно, до первого await — guard в handleSync видит сразу
+  opLabel = 'rotate'; // синхронно, до первого await — guard в handleSync видит сразу
   try {
     const drained = await waitForDrain();
     if (!drained) {
@@ -190,7 +191,62 @@ async function handlePhraseRotate(msg) {
     await setLastError(message);
     return { ok: false, error: message };
   } finally {
-    rotating = false;
+    opLabel = null;
+  }
+}
+
+/**
+ * atr:data:wipe — полное удаление всей информации (v0.2.6): облачные отметки
+ * (если доступны), статусы/копии отметок в chrome.storage и флаг для content
+ * (localStorage сайта чистит вкладка — сразу по onChanged или при следующем
+ * визите). Порядок как при ротации: guard → drain → DELETE облака (сбой →
+ * НИЧЕГО не тронуто, повтор безопасен) → очистка storage → флаг.
+ *
+ * Без конфига или без фразы облако пропускается (`cloudDeleted:false`,
+ * `reason: 'no-config'|'no-phrase'`): локальные данные обязан удалить любой
+ * пользователь, даже если синхронизация не настраивалась.
+ */
+async function handleDataWipe() {
+  opLabel = 'wipe'; // синхронно, до первого await — guard в handleSync видит сразу
+  try {
+    const drained = await waitForDrain();
+    if (!drained) {
+      return { ok: false, error: 'не удалось дождаться текущих синхронизаций — повторите попытку' };
+    }
+
+    let cloudDeleted = false;
+    let reason = null;
+    const { config, ready } = await loadConfig();
+    const phrase = await getPhrase();
+    if (!ready) {
+      reason = 'no-config';
+    } else if (!phrase) {
+      reason = 'no-phrase';
+    } else {
+      const userId = (await getUserId()) || (await deriveUserId(phrase));
+      await initFirebase(config).clearCloud(userId); // сбой → catch, storage не тронут
+      cloudDeleted = true;
+    }
+
+    // Локальные данные расширения, включая копии отметок (stats, snapshot)
+    // и отложенный импорт — иначе после вайпа «воскреснут» бы откуда-нибудь.
+    await chrome.storage.local.remove([
+      K_PHRASE, K_USER, K_LAST_SYNC, K_LAST_ERROR, K_STATS, K_SNAPSHOT, 'atr.sync.pendingImport'
+    ]);
+    // Флаг — последним: content в открытых вкладках чистит localStorage сразу,
+    // при отсутствии вкладок — при следующем визите на author.today.
+    await chrome.storage.local.set({ [K_WIPE]: Date.now() });
+    return { ok: true, cloudDeleted, reason };
+  } catch (err) {
+    // Сбой ДО очистки storage (обычно DELETE облака): всё ещё на месте.
+    let message = String(err && err.message ? err.message : err);
+    if (err && (err.status === 401 || err.status === 403)) {
+      message += ' — проверьте правила Realtime Database (должны быть открыты, см. DEVELOPMENT.md)';
+    }
+    await setLastError(message);
+    return { ok: false, error: message };
+  } finally {
+    opLabel = null;
   }
 }
 
@@ -199,10 +255,15 @@ async function handlePhraseRotate(msg) {
  * pull облака → LWW-сравнение с локальным срезом → push новых → вернуть pull.
  */
 async function handleSync(msg, sender) {
-  // Ротация (v0.2.6): guard БЕЗ await — атомарен с флагом `rotating`
+  // Guard ротации/вайпа (v0.2.6): БЕЗ await — атомарен с присвоением `opLabel`
   // (оба выполняются синхронно при входе в хендлер). Отклонённый sync
-  // ретраится на content со штатным backoff.
-  if (rotating) return { ok: false, error: 'идёт смена кодовой фразы' };
+  // ретраится на content (ротация — скоро, вайп — штатным backoff).
+  if (opLabel) {
+    return {
+      ok: false,
+      error: opLabel === 'rotate' ? 'идёт смена кодовой фразы' : 'идёт удаление данных'
+    };
+  }
   activeSyncs++; // инкремент тоже до первого await — drain гарантированно ждёт
   try {
     // Статистика (v0.2.2): кэш счётчиков обновляется в первую очередь —
@@ -257,6 +318,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     'atr:phrase:set': handlePhraseSet,
     'atr:phrase:clear': handlePhraseClear,
     'atr:phrase:rotate': handlePhraseRotate,
+    'atr:data:wipe': handleDataWipe,
     'atr:sync:sync': handleSync
   };
   const handler = handlers[type];

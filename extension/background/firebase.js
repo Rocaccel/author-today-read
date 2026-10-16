@@ -119,6 +119,18 @@ export function initFirebase(config = {}) {
   }
 
   /**
+   * Полное удаление облачных отметок пользователя (вайп, v0.2.6):
+   * DELETE узла marks целиком — тот же подузел, что и при ротации
+   * (правила §8.2 дают .write только на marks). Идемпотентно: несуществующий
+   * узел — 200, ошибок нет. Бросает httpError('wipe-cloud') при сбое —
+   * вызывающий обязан остановиться ДО любых изменений локальных данных.
+   */
+  async function clearCloud(userId) {
+    const res = await fetch(marksUrl(userId), { method: 'DELETE' });
+    if (!res.ok) throw httpError('wipe-cloud', res);
+  }
+
+  /**
    * Полная синхронизация одним round-trip.
    *
    * Правила GC (v0.2.1, cutoff = now − 90 дней, работает только ТОМБСТОУН —
@@ -318,5 +330,5 @@ export function initFirebase(config = {}) {
     return err;
   }
 
-  return { isReady, sync, pullDocs, rotate };
+  return { isReady, sync, pullDocs, rotate, clearCloud };
 }

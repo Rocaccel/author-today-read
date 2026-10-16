@@ -233,6 +233,26 @@
     return removed;
   }
 
+  /**
+   * Полный вайп локальных отметок (v0.2.6): удаляет КЛЮЧИ v2 и v1 целиком —
+   * без томбстоунов и без записи нового содержимого. Событие 'atr:wipe'
+   * (детально: {wids} — что было до удаления) слушает dom.js: перерисовка
+   * снятых панелей + чистка pref «Скрыть отмечённые». 'atr:changed' НЕ шлём:
+   * вызывается после удаления фразы — пушить в облако уже нечего.
+   * Возвращает workId, существовавшие до стирания.
+   */
+  function wipeAll() {
+    const wids = Object.keys(getAll());
+    try {
+      localStorage.removeItem(KEY_V2);
+      localStorage.removeItem(KEY_V1);
+      document.dispatchEvent(new CustomEvent('atr:wipe', { detail: { wids } }));
+    } catch (err) {
+      console.error('[ATR] не удалось стереть локальные отметки:', err);
+    }
+    return wids;
+  }
+
   ATR.storage = {
     KEY_V2,
     KEY_V1,
@@ -245,6 +265,7 @@
     remove,
     toggle,
     mergeRemote,
-    applyGc
+    applyGc,
+    wipeAll
   };
 })();

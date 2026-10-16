@@ -296,6 +296,18 @@
       if (Array.isArray(wids)) for (const wid of wids) ATR.ui.renderAll(wid);
     });
 
+    // 3б) Полный вайп (v0.2.6): пользователь удалил все данные — снимаем
+    //     pref тумблера (в ЭТОЙ вкладке нативного события storage нет) и
+    //     перерисовываем снятые панели (событие шлёт storage.wipeAll).
+    document.addEventListener('atr:wipe', (e) => {
+      localStorage.removeItem(KEY_PREF);
+      const btn = document.querySelector('[data-atr-toggle]');
+      if (btn) updateToggle(btn);
+      applyHideFilter(); // pref выключен → показываем все строки
+      const wids = e && e.detail && e.detail.wids;
+      if (Array.isArray(wids)) for (const wid of wids) ATR.ui.renderAll(wid);
+    });
+
     // 4) Изменение отметки в ДРУГОЙ вкладке: нативное событие `storage`.
     //    Также сюда же приходит смена pref «Скрыть отмечённые» (v0.2.5) —
     //    он лежит в localStorage страницы, событие летит в остальные вкладки.

@@ -905,6 +905,148 @@ async function main() {
     '17г: guard-отказ ротации повторён коротким таймером, а не backoff'
   );
 
+  console.log('\n[18] Полное удаление данных (вайп, v0.2.6): облако, статусы, localStorage');
+
+  globalThis.chrome = swChromeStub;
+  const wipeKeys = [
+    'atr.sync.phrase', 'atr.sync.userId', 'atr.sync.lastSync', 'atr.sync.lastError',
+    'atr.sync.stats', 'atr.sync.snapshot', 'atr.sync.pendingImport'
+  ];
+
+  const wipePhrase = 'пример совершенно новой фразы для удаления всех данных из пятнадцати слов здесь';
+  assert(!phrase.validatePhrase(wipePhrase), '18: тестовая фраза валидна (12 слов)');
+  const wipeUid = await phrase.deriveUserId(wipePhrase);
+
+  // Фейковая RTDB для вайпа: только DELETE; GET/PATCH — ошибка теста
+  const wipeLog = []; // {method, uid}
+  let wipeFailDelete = false;
+  let wipeSlowMs = 0;
+  globalThis.fetch = async (url, opts = {}) => {
+    const method = opts.method || 'GET';
+    const matched = /\/users\/([^/]+)\/marks\.json$/.exec(String(url));
+    if (!matched) throw new Error('неожиданный URL вайпа: ' + url);
+    if (wipeSlowMs) await sleep(wipeSlowMs);
+    wipeLog.push({ method, uid: matched[1] });
+    if (method === 'DELETE') {
+      if (wipeFailDelete) return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
+      return { ok: true, json: async () => null };
+    }
+    throw new Error('вайп не должен выполнять ' + method);
+  };
+
+  // --- 18а: нет конфига — облако пропущено, локальное чистится всегда ---
+  fb.__setConfigForTest({});
+  delete swStore['atr.sync.wipePending'];
+  swStore['atr.sync.stats'] = { read: 7, skip: 2, total: 9, at: '2026-10-16T00:00:00.000Z' };
+  swStore['atr.sync.snapshot'] = { entries: { '1': { m: 'read', t: 1 } }, at: 'x' };
+  let wipeR = await callSw({ type: 'atr:data:wipe' }, {});
+  assert(wipeR.ok && wipeR.cloudDeleted === false && wipeR.reason === 'no-config', '18а: без конфига — ok, облако пропущено (no-config)');
+  assert(wipeLog.length === 0, '18а: сетевых запросов не было');
+  assert(!('atr.sync.stats' in swStore) && !('atr.sync.snapshot' in swStore), '18а: статистика и снапшот (копии отметок) удалены');
+  assert(!('atr.sync.phrase' in swStore) && !('atr.sync.userId' in swStore), '18а: фраза/userId удалены');
+  assert(swStore['atr.sync.wipePending'] > 0, '18а: флаг вайпа установлен для content');
+
+  // --- 18б: конфиг+фраза есть, DELETE падает — НИЧЕГО не тронуто ---
+  fb.__setConfigForTest({ databaseURL: 'https://fake-rtdb.example.test' });
+  delete swStore['atr.sync.wipePending'];
+  swStore['atr.sync.phrase'] = wipePhrase;
+  swStore['atr.sync.userId'] = wipeUid;
+  swStore['atr.sync.stats'] = { read: 3, skip: 1, total: 4, at: '2026-10-16T00:00:00.000Z' };
+  wipeFailDelete = true;
+  wipeR = await callSw({ type: 'atr:data:wipe' }, {});
+  assert(wipeR.ok === false && /wipe-cloud/.test(wipeR.error), '18б: сбой DELETE → ошибка wipe-cloud');
+  assert(swStore['atr.sync.phrase'] === wipePhrase && swStore['atr.sync.userId'] === wipeUid, '18б: фраза/userId не тронуты');
+  assert(swStore['atr.sync.stats'], '18б: статистика на месте (очистка не выполнялась)');
+  assert(!swStore['atr.sync.wipePending'], '18б: флаг не установлен — операция откатилась целиком');
+  assert(wipeLog.filter((e) => e.method === 'DELETE').length === 1, '18б: DELETE был ровно один (неудачный)');
+
+  // --- 18в: успех — DELETE облака, все статусы удалены, guard во время вайпа ---
+  wipeFailDelete = false;
+  wipeLog.length = 0;
+  wipeSlowMs = 150;
+  const wipeSlowP = callSw({ type: 'atr:data:wipe' }, {});
+  await sleep(30);
+  const wipeGuard = await callSw(
+    { type: 'atr:sync:sync', entries: { '9': { m: 'read', t: 1 } } },
+    { tab: { id: 9 } }
+  );
+  assert(wipeGuard.ok === false && /удаление данных/.test(wipeGuard.error), '18в: sync во время вайпа отклонён (guard)');
+  wipeR = await wipeSlowP;
+  wipeSlowMs = 0;
+  assert(wipeR.ok && wipeR.cloudDeleted === true && wipeR.reason === null, '18в: успех, облако удалено');
+  const wipeDels = wipeLog.filter((e) => e.method === 'DELETE');
+  assert(wipeDels.length === 1 && wipeDels[0].uid === wipeUid, '18в: ровно один DELETE на users/{uid}/marks');
+  assert(wipeLog.every((e) => e.method === 'DELETE'), '18в: GET/PATCH не выполнялись');
+  assert(wipeKeys.every((k) => !(k in swStore)), '18в: все 7 ключей статусов/копий удалены');
+  assert(swStore['atr.sync.wipePending'] > 0, '18в: флаг вайпа установлен');
+
+  // идемпотентность: повтор без фразы — ok, облако пропущено
+  wipeR = await callSw({ type: 'atr:data:wipe' }, {});
+  assert(wipeR.ok && wipeR.cloudDeleted === false && wipeR.reason === 'no-phrase', '18в: повтор — ok, no-phrase (идемпотентно)');
+
+  // --- 18г: content — флаг → стирание localStorage (init ДО sync + onChanged) ---
+  const dom18w = new JSDOM(HTML, { url: 'https://author.today/work/genre/fantasy', runScripts: 'outside-only', pretendToBeVisual: true });
+  const wipeStore18 = { 'atr.sync.wipePending': 1760000000000 };
+  const removed18 = [];
+  const sent18 = [];
+  const wipeEvents18 = [];
+  let wipeListener18 = null;
+  dom18w.window.chrome = {
+    runtime: {
+      sendMessage: async (msg) => {
+        sent18.push(msg);
+        // после вайпа фразы нет → реальный SW ответил бы skip без сети
+        if (msg.type === 'atr:sync:sync') return { ok: false, skip: true, reason: 'phrase' };
+        return { ok: true };
+      }
+    },
+    storage: {
+      onChanged: { addListener: (fn) => { wipeListener18 = fn; } },
+      local: {
+        get: async (keys) => {
+          const out = {};
+          for (const k of Array.isArray(keys) ? keys : [keys]) if (k in wipeStore18) out[k] = wipeStore18[k];
+          return out;
+        },
+        set: async (obj) => { Object.assign(wipeStore18, obj); },
+        remove: async (keys) => {
+          for (const k of Array.isArray(keys) ? keys : [keys]) { removed18.push(k); delete wipeStore18[k]; }
+        }
+      }
+    }
+  };
+  // данные страницы: отметки v2 + легаси v1 + pref тумблера
+  dom18w.window.localStorage.setItem('atr.v2.marks', JSON.stringify({ '659887': { m: 'read', t: 1760000000000 } }));
+  dom18w.window.localStorage.setItem('atr.v1.marks', JSON.stringify({ '99': 'skip' }));
+  dom18w.window.localStorage.setItem('atr.ui.hideMarked', '1');
+  dom18w.window.document.addEventListener('atr:wipe', (e) => wipeEvents18.push(e && e.detail));
+  // DOMContentLoaded: main.js должен пройти sync.init() и dom.start()
+  // синхронно, иначе событие atr:wipe уйдёт раньше подписки dom
+  if (dom18w.window.document.readyState === 'loading') {
+    await new Promise((r) => dom18w.window.document.addEventListener('DOMContentLoaded', r, { once: true }));
+  }
+  for (const f of ['content/storage.js', 'content/sync.js', 'content/ui.js', 'content/dom.js', 'content/main.js']) {
+    dom18w.window.eval(read(f));
+  }
+  assert(await waitFor(() => !('atr.sync.wipePending' in wipeStore18)), '18г: init — флаг удалён после применения (до первого sync)');
+  assert(dom18w.window.localStorage.getItem('atr.v2.marks') === null, '18г: ключ v2 стёрт');
+  assert(dom18w.window.localStorage.getItem('atr.v1.marks') === null, '18г: легаси-ключ v1 стёрт');
+  assert(dom18w.window.localStorage.getItem('atr.ui.hideMarked') === null, '18г: pref «Скрыть отмечённые» снят (обработчик dom)');
+  assert(
+    wipeEvents18.length === 1 && wipeEvents18[0].wids && wipeEvents18[0].wids.includes('659887'),
+    '18г: событие atr:wipe со списком снятых workId'
+  );
+
+  // ветка onChanged: уже открытая вкладка стирает немедленно
+  dom18w.window.localStorage.setItem('atr.v2.marks', JSON.stringify({ '1': { m: 'skip', t: 1 } }));
+  wipeStore18['atr.sync.wipePending'] = 1760000000001;
+  assert(typeof wipeListener18 === 'function', '18г: слушатель chrome.storage.onChanged установлен');
+  wipeListener18({ 'atr.sync.wipePending': { newValue: 1760000000001 } }, 'local');
+  assert(await waitFor(() => !('atr.sync.wipePending' in wipeStore18)), '18г: onChanged — вкладка стирает сразу');
+  assert(dom18w.window.localStorage.getItem('atr.v2.marks') === null, '18г: повторное стирание — ключ снова пуст');
+  assert(removed18.filter((k) => k === 'atr.sync.wipePending').length === 2, '18г: флаг удалялся дважды (идемпотентно)');
+  assert(sent18.some((m) => m.type === 'atr:sync:sync'), '18г: после стирания ушёл sync (обнулить кэш статистики)');
+
   globalThis.fetch = realFetch;
 
   console.log(failures === 0 ? '\nВСЕ ТЕСТЫ ПРОЙДЕНЫ' : `\nПРОВАЛОВ: ${failures}`);
