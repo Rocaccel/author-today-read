@@ -97,6 +97,7 @@ textarea:focus {
   gap: 8px;
   margin-top: 12px;
   flex-wrap: wrap;
+  justify-content: center; /* все группы кнопок — по центру карточки (не .device-actions) */
 }
 
 button {
