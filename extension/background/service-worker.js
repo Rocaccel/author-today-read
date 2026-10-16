@@ -8,6 +8,9 @@
  *   atr:status        → состояние (конфиг/фраза/последняя синхронизация)
  *   atr:phrase:set    {phrase}  → валидация, userId, сохранение фразы
  *   atr:phrase:clear  → выход (фраза удаляется с устройства)
+ *   atr:phrase:rotate {phrase}  → ротация фразы без потери отметок (v0.2.6):
+ *                     перешифровка + переезд на новый userId, старый путь
+ *                     удаляется, потом сохраняется новая фраза
  *   atr:sync:sync     {entries} → полный round-trip с Realtime Database,
  *                     возврат pull
  *
@@ -62,6 +65,22 @@ async function getPhrase() {
   return data[K_PHRASE] || null;
 }
 
+// --- Ротация фразы (v0.2.6): окно гонки с незавершёнными sync -------------
+// `rotating=true` ставится синхронно до первого await, guard в handleSync
+// проверяет его до любого await — новый sync либо отклонён ДО инкремента
+// счётчика, либо (начатый раньше) уже посчитан и ждётся drain'ом.
+let rotating = false;
+let activeSyncs = 0;
+
+/** Дождаться завершения sync, начатых до ротации (или timeout, мс). */
+async function waitForDrain(timeoutMs = 10000) {
+  const started = Date.now();
+  while (activeSyncs > 0 && Date.now() - started < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return activeSyncs === 0;
+}
+
 /** Сохранённый userId (hex) или null. */
 async function getUserId() {
   const data = await chrome.storage.local.get(K_USER);
@@ -114,48 +133,119 @@ async function handlePhraseClear() {
 }
 
 /**
- * atr:sync:sync — полный round-trip:
- * pull облака → LWW-сравнение с локальным срезом → push новых → вернуть pull.
+ * atr:phrase:rotate — ротация фразы без потери отметок (v0.2.6).
+ *
+ * Порядок (безопасность при сбое):
+ *   1) drain незавершённых sync (флаг rotating закрывает окно гонки —
+ *      иначе параллельный push мог бы воскресить старый путь после DELETE);
+ *   2) миграция в firebase.rotate: LWW-слияние (облако + снапшот + новый
+ *      путь) → перешифровка → PATCH нового пути → DELETE старого;
+ *   3) и ТОЛЬКО потом сохранение новой фразы/userId в chrome.storage.
+ * Сбой на любом шаге оставляет хранилище и старый путь нетронутыми —
+ * ротацию можно спокойно повторить.
  */
-async function handleSync(msg, sender) {
-  // Статистика (v0.2.2): кэш счётчиков обновляется в первую очередь —
-  // до проверок конфига/фразы (локальные данные) и только от content-вкладок.
-  await saveStatsFrom(msg && msg.entries, sender);
-
-  const { config, ready } = await loadConfig();
-  if (!ready) return { ok: false, skip: true, reason: 'config' };
-
-  const phrase = await getPhrase();
-  if (!phrase) return { ok: false, skip: true, reason: 'phrase' };
-
-  let userId = await getUserId();
-  if (!userId) {
-    userId = await deriveUserId(phrase); // самовосстановление после чистки storage
-    await chrome.storage.local.set({ [K_USER]: userId });
-  }
-
+async function handlePhraseRotate(msg) {
+  rotating = true; // синхронно, до первого await — guard в handleSync видит сразу
   try {
+    const drained = await waitForDrain();
+    if (!drained) {
+      return { ok: false, error: 'не удалось дождаться текущих синхронизаций — повторите попытку' };
+    }
+
+    const { config, ready } = await loadConfig();
+    if (!ready) return { ok: false, error: 'синхронизация не настроена (нет конфига) — смена фразы невозможна' };
+
+    const oldPhrase = await getPhrase();
+    if (!oldPhrase) return { ok: false, error: 'нет текущей фразы — сначала войдите' };
+
+    const newPhrase = normalizePhrase(msg && msg.phrase);
+    const validationError = validatePhrase(newPhrase);
+    if (validationError) return { ok: false, error: validationError };
+    if (newPhrase === oldPhrase) return { ok: false, error: 'новая фраза совпадает с текущей' };
+
+    const oldUserId = (await getUserId()) || (await deriveUserId(oldPhrase));
+    const newUserId = await deriveUserId(newPhrase);
+    if (newUserId === oldUserId) return { ok: false, error: 'новая фраза совпадает с текущей' };
+
+    const data = await chrome.storage.local.get(K_SNAPSHOT);
+    const snapshot = (data[K_SNAPSHOT] && data[K_SNAPSHOT].entries) || {};
+
     const client = initFirebase(config);
-    const result = await client.sync(userId, phrase, (msg && msg.entries) || {});
-    await chrome.storage.local.set({ [K_LAST_SYNC]: new Date().toISOString() });
+    const result = await client.rotate(oldUserId, oldPhrase, newUserId, newPhrase, snapshot);
+
+    // Миграция и DELETE старого пути выполнены — фиксируем новую фразу.
+    await chrome.storage.local.set({
+      [K_PHRASE]: newPhrase,
+      [K_USER]: newUserId,
+      [K_LAST_SYNC]: new Date().toISOString()
+    });
     await setLastError(null);
-    // gc (v0.2.1) — workId протухших томбстоунов: content жёстко удалит их
-    // локально через storage.applyGc (узлы в БД уже удалены в firebase.js).
-    return {
-      ok: true,
-      pull: result.pull,
-      pushed: result.pushed,
-      skipped: result.skipped,
-      gc: result.gc || []
-    };
+    return { ok: true, userId: newUserId, migrated: result.migrated, skipped: result.skipped };
   } catch (err) {
-    // Ошибка сети/правил — сохраняем для options, content остаётся тихим.
+    // Ошибка сети/правил ДО сохранения фразы: storage и старый путь не тронуты.
     let message = String(err && err.message ? err.message : err);
     if (err && (err.status === 401 || err.status === 403)) {
       message += ' — проверьте правила Realtime Database (должны быть открыты, см. DEVELOPMENT.md)';
     }
     await setLastError(message);
     return { ok: false, error: message };
+  } finally {
+    rotating = false;
+  }
+}
+
+/**
+ * atr:sync:sync — полный round-trip:
+ * pull облака → LWW-сравнение с локальным срезом → push новых → вернуть pull.
+ */
+async function handleSync(msg, sender) {
+  // Ротация (v0.2.6): guard БЕЗ await — атомарен с флагом `rotating`
+  // (оба выполняются синхронно при входе в хендлер). Отклонённый sync
+  // ретраится на content со штатным backoff.
+  if (rotating) return { ok: false, error: 'идёт смена кодовой фразы' };
+  activeSyncs++; // инкремент тоже до первого await — drain гарантированно ждёт
+  try {
+    // Статистика (v0.2.2): кэш счётчиков обновляется в первую очередь —
+    // до проверок конфига/фразы (локальные данные) и только от content-вкладок.
+    await saveStatsFrom(msg && msg.entries, sender);
+
+    const { config, ready } = await loadConfig();
+    if (!ready) return { ok: false, skip: true, reason: 'config' };
+
+    const phrase = await getPhrase();
+    if (!phrase) return { ok: false, skip: true, reason: 'phrase' };
+
+    let userId = await getUserId();
+    if (!userId) {
+      userId = await deriveUserId(phrase); // самовосстановление после чистки storage
+      await chrome.storage.local.set({ [K_USER]: userId });
+    }
+
+    try {
+      const client = initFirebase(config);
+      const result = await client.sync(userId, phrase, (msg && msg.entries) || {});
+      await chrome.storage.local.set({ [K_LAST_SYNC]: new Date().toISOString() });
+      await setLastError(null);
+      // gc (v0.2.1) — workId протухших томбстоунов: content жёстко удалит их
+      // локально через storage.applyGc (узлы в БД уже удалены в firebase.js).
+      return {
+        ok: true,
+        pull: result.pull,
+        pushed: result.pushed,
+        skipped: result.skipped,
+        gc: result.gc || []
+      };
+    } catch (err) {
+      // Ошибка сети/правил — сохраняем для options, content остаётся тихим.
+      let message = String(err && err.message ? err.message : err);
+      if (err && (err.status === 401 || err.status === 403)) {
+        message += ' — проверьте правила Realtime Database (должны быть открыты, см. DEVELOPMENT.md)';
+      }
+      await setLastError(message);
+      return { ok: false, error: message };
+    }
+  } finally {
+    activeSyncs--; // ровно один декремент на каждый инкремент (все пути возврата)
   }
 }
 
@@ -166,6 +256,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     'atr:status': handleStatus,
     'atr:phrase:set': handlePhraseSet,
     'atr:phrase:clear': handlePhraseClear,
+    'atr:phrase:rotate': handlePhraseRotate,
     'atr:sync:sync': handleSync
   };
   const handler = handlers[type];

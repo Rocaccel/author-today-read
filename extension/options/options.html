@@ -61,6 +61,7 @@
           <div class="row">
             <button id="btn-show" type="button">Показать</button>
             <button id="btn-copy" type="button">Копировать</button>
+            <button id="btn-rotate" type="button" class="danger">Сменить фразу</button>
           </div>
           <p class="alert-warning">
             Фраза — единственный доступ к облачным отметкам: без неё записи
@@ -68,6 +69,34 @@
           </p>
         </dd>
       </dl>
+
+      <!-- Ротация фразы (v0.2.6): перешифровка + переезд, старый путь удаляется -->
+      <div id="rotate-form" class="hidden">
+        <h3>Смена кодовой фразы</h3>
+        <p class="alert-warning">
+          Все отметки будут перешифрованы новой фразой и перенесены на новый
+          путь в облаке; старая база удаляется — доступ по старой фразе
+          пропадает полностью. Отметки не теряются.
+          <br>Сразу после смены введите новую фразу на всех остальных
+          устройствах, иначе они продолжат работать со старой фразой.
+        </p>
+        <label for="rotate-input">Новая фраза (12–30 слов):</label>
+        <textarea id="rotate-input" rows="3" spellcheck="false" autocomplete="off"
+                  placeholder="apple bridge cedar ..."></textarea>
+        <label id="rotate-confirm-label" class="checkbox hidden">
+          <input type="checkbox" id="rotate-confirm-check">
+          Я сохранил(а) сгенерированную фразу в безопасном месте
+        </label>
+        <div class="row">
+          <button id="btn-rotate-generate" type="button">Сгенерировать</button>
+          <button id="btn-rotate-do" type="button" class="danger">Сменить и войти</button>
+          <button id="btn-rotate-cancel" type="button">Отмена</button>
+        </div>
+        <p id="rotate-error" class="error hidden"></p>
+      </div>
+      <p id="rotate-done" class="muted hidden">
+        Фраза заменена. Введите её на остальных устройствах.
+      </p>
       <p id="status-error" class="error hidden"></p>
       <div class="row">
         <button id="btn-sync" type="button" class="primary">Синхронизировать сейчас</button>

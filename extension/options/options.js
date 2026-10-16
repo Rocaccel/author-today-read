@@ -22,6 +22,7 @@ const SNAPSHOT_KEY = 'atr.sync.snapshot';
 const PENDING_IMPORT_KEY = 'atr.sync.pendingImport';
 
 let generatedThisSession = false; // фразу сгенерировали здесь — требуем подтверждение
+let rotateGenerated = false; // то же для формы ротации (v0.2.6)
 let currentPhrase = null; // фраза из atr:status (для показа/копирования)
 let phraseVisible = false; // раскрыли фразу кнопкой «Показать»
 const PHRASE_MASK = '•••• •••• •••• •••• ••••';
@@ -66,6 +67,9 @@ function renderStatus(status) {
   if (status.hasPhrase) {
     $('user-id').textContent = status.userId || '—';
     $('last-sync').textContent = formatTime(status.lastSync);
+    // Ротация (v0.2.6) возможна только при настроенном конфиге — без него
+    // старый путь в облаке недоступен и удалять нечего.
+    show($('btn-rotate'), !!status.configReady);
 
     let state = 'готово к работе';
     if (!status.configReady) state = 'конфиг не заполнен — только локально';
@@ -249,7 +253,73 @@ async function onCopyPhrase() {
 async function onLogout() {
   await send({ type: 'atr:phrase:clear' });
   generatedThisSession = false;
+  showRotateForm(false); // форма ротации без фразы неактуальна
   await refresh();
+}
+
+// --- Ротация фразы (v0.2.6): форма «Сменить фразу» -------------------------
+
+/** Открыть/закрыть форму ротации; закрытие сбрасывает поля и подтверждение. */
+function showRotateForm(open) {
+  show($('rotate-form'), open);
+  if (open) {
+    show($('rotate-error'), false);
+    show($('rotate-done'), false); // прошлый успех скрываем при новом входе
+    return;
+  }
+  $('rotate-input').value = '';
+  rotateGenerated = false;
+  $('rotate-confirm-check').checked = false;
+  show($('rotate-confirm-label'), false);
+  show($('rotate-error'), false);
+}
+
+/** Сгенерировать новую фразу в форме ротации (обязателен чекбокс). */
+function onRotateGenerate() {
+  $('rotate-input').value = generatePhrase();
+  rotateGenerated = true;
+  show($('rotate-confirm-label'), true);
+  $('rotate-confirm-check').checked = false;
+  show($('rotate-error'), false);
+}
+
+/** Ротация: валидация → atr:phrase:rotate → статус. Ошибки инлайн. */
+async function onRotateDo() {
+  const errorBox = $('rotate-error');
+  const phrase = normalizePhrase($('rotate-input').value);
+
+  const error = validatePhrase(phrase);
+  if (error) {
+    errorBox.textContent = error;
+    show(errorBox, true);
+    return;
+  }
+  if (rotateGenerated && !$('rotate-confirm-check').checked) {
+    errorBox.textContent = 'Сначала подтвердите, что новая фраза сохранена';
+    show(errorBox, true);
+    return;
+  }
+
+  const btn = $('btn-rotate-do');
+  btn.disabled = true;
+  btn.textContent = 'Смена фразы…';
+  try {
+    const res = await send({ type: 'atr:phrase:rotate', phrase });
+    if (!res || !res.ok) {
+      errorBox.textContent = (res && res.error) || 'Не удалось сменить фразу';
+      show(errorBox, true);
+      return;
+    }
+    showRotateForm(false); // включая сброс полей/подтверждения
+    await refresh(); // новый userId в статусе
+    show($('rotate-done'), true);
+  } catch (err) {
+    errorBox.textContent = String(err && err.message ? err.message : err);
+    show(errorBox, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Сменить и войти';
+  }
 }
 
 $('btn-generate').addEventListener('click', onGenerate);
@@ -258,6 +328,10 @@ $('btn-show').addEventListener('click', onShowPhrase);
 $('btn-copy').addEventListener('click', onCopyPhrase);
 $('btn-sync').addEventListener('click', onSyncNow);
 $('btn-logout').addEventListener('click', onLogout);
+$('btn-rotate').addEventListener('click', () => showRotateForm(true));
+$('btn-rotate-generate').addEventListener('click', onRotateGenerate);
+$('btn-rotate-do').addEventListener('click', onRotateDo);
+$('btn-rotate-cancel').addEventListener('click', () => showRotateForm(false));
 $('btn-export').addEventListener('click', onExport);
 $('btn-import').addEventListener('click', () => $('import-file').click());
 $('import-file').addEventListener('change', onImportFile);

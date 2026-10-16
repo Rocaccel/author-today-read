@@ -29,6 +29,11 @@ h2 {
   margin: 0 0 8px;
 }
 
+h3 {
+  font-size: 14px;
+  margin: 16px 0 4px;
+}
+
 .card {
   background: #fff;
   border: 1px solid #e0e4e7;

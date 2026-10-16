@@ -4,8 +4,8 @@
  * Почему REST, а не SDK (см. AGENTS.md §8):
  *   - MV3 ES-модульный SW не умеет грузить удалённые скрипты, а firebase-SDK
  *     потребовал бы сборки (в проекте запрещена, §7);
- *   - Realtime Database полностью доступен по REST: GET/PATCH на узел
- *     покрывают наши сценарии (pull всех отметок и пачечная запись).
+ *   - Realtime Database полностью доступен по REST: GET/PATCH/DELETE на узел
+ *     покрывают наши сценарии (pull всех отметок, пачечная запись, ротация).
  *
  * БД проекта — Realtime Database (databaseURL из .env), НЕ Firestore.
  * Модель данных (см. AGENTS.md §8.2):
@@ -48,6 +48,11 @@ export function loadConfig() {
       .catch(() => ({ config: {}, ready: false })); // файла нет (свежий клон) — это норма
   }
   return configPromise;
+}
+
+/** Тестовый хук (npm test): подменить конфиг, минуя fetch config.json. */
+export function __setConfigForTest(config) {
+  configPromise = Promise.resolve({ config: config || {}, ready: !!(config && config.databaseURL) });
 }
 
 /** Клиент инициализируется с пустым конфигом; реальные значения loadConfig() подставит позже. */
@@ -210,6 +215,97 @@ export function initFirebase(config = {}) {
     return { pull, pushed: toPush.length, skipped, gc };
   }
 
+  /**
+   * Ротация кодовой фразы (v0.2.6): переезд на новый userId с перешифровкой
+   * ВСЕХ записей — без потери отметок.
+   *
+   * Источники слияния (LWW по t, томбстоуны m:null переносятся как есть):
+   *   A) старый путь — расшифровка СТАРЫМ ключом;
+   *   B) снапшот локального среза из chrome.storage (atr.sync.snapshot);
+   *   C) новый путь — идемпотентность повторного запуска (новым ключом).
+   *
+   * Порядок записи критичен для безопасности:
+   *   1) один PATCH перешифрованного на НОВЫЙ путь (атомарен в RTDB);
+   *   2) только после успешного PATCH — DELETE старого узла marks целиком;
+   *   3) сохранение новой фразы/service-worker делает ПОСЛЕ возврата.
+   * Сбой на любом шаге = ничего не изменилось, ротацию можно повторить.
+   * DELETE идёт именно на users/{uid}/marks.json (не на users/{uid}):
+   *   правила БД дают write только на подузел marks (§8.2) — без их изменения.
+   *
+   * GC не применяется: протухшие томбстоуны переезжают со своими updatedAt,
+   * разберёт обычный sync уже нового пути (§8.2а).
+   *
+   * @param {string} oldUserId — hex hash старой фразы (путь в БД)
+   * @param {string} oldPhrase — нормализованная старая фраза (старый ключ)
+   * @param {string} newUserId — hex hash новой фразы
+   * @param {string} newPhrase — нормализованная новая фраза (новой ключ)
+   * @param {Object} snapshotEntries — локальный срез {wid: {m, t}} из снапшота
+   * @returns {Promise<{migrated: number, skipped: number}>}
+   *   migrated — сколько записей переехало; skipped — не расшифровались (A)
+   */
+  async function rotate(oldUserId, oldPhrase, newUserId, newPhrase, snapshotEntries) {
+    const oldKey = await getKeyForPhrase(oldPhrase);
+    const newKey = await getKeyForPhrase(newPhrase);
+    const merged = new Map(); // wid → {m, t}
+    let skipped = 0;
+
+    // A) Старый путь: расшифровка старым ключом (битая запись — счётчик, не фейл).
+    for (const doc of await pullDocs(oldUserId)) {
+      try {
+        const mark = await decryptMark(oldKey, doc);
+        merged.set(doc.workId, { m: mark, t: doc.updatedAt });
+      } catch (err) {
+        skipped++;
+        console.warn('[ATR] ротация: запись старого пути не расшифрована:', doc.workId);
+      }
+    }
+
+    // B) Снапшот локального среза: побеждает только строго более новая запись.
+    for (const [wid, entry] of Object.entries(snapshotEntries || {})) {
+      if (!entry || typeof entry.t !== 'number') continue;
+      if (entry.m !== 'read' && entry.m !== 'skip' && entry.m !== null) continue;
+      const current = merged.get(wid);
+      if (!current || entry.t > current.t) merged.set(wid, { m: entry.m, t: entry.t });
+    }
+
+    // C) Новый путь (повтор запуска): чужая/битая запись не мешает —
+    // наша из patch её перезапишет, если новее.
+    if (oldUserId !== newUserId) {
+      for (const doc of await pullDocs(newUserId)) {
+        try {
+          const mark = await decryptMark(newKey, doc);
+          const current = merged.get(doc.workId);
+          if (!current || doc.updatedAt > current.t) merged.set(doc.workId, { m: mark, t: doc.updatedAt });
+        } catch (err) {
+          // не расшифровалась новым ключом — пропускаем (перезапишем своей)
+        }
+      }
+    }
+
+    // Перешифровка новым ключом → один PATCH на новый путь (атомарен).
+    const patch = {};
+    for (const [wid, entry] of merged) {
+      const encrypted = await encryptMark(newKey, entry.m);
+      patch[wid] = { updatedAt: entry.t, ...encrypted };
+    }
+    if (Object.keys(patch).length) {
+      const res = await fetch(marksUrl(newUserId), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch)
+      });
+      if (!res.ok) throw httpError('rotate-push', res);
+    }
+
+    // Старый узел — ТОЛЬКО после успешного push (порядок критичен, см. докс).
+    if (oldUserId !== newUserId) {
+      const res = await fetch(marksUrl(oldUserId), { method: 'DELETE' });
+      if (!res.ok) throw httpError('rotate-delete', res);
+    }
+
+    return { migrated: merged.size, skipped };
+  }
+
   function isReady() {
     return !!root;
   }
@@ -222,5 +318,5 @@ export function initFirebase(config = {}) {
     return err;
   }
 
-  return { isReady, sync, pullDocs };
+  return { isReady, sync, pullDocs, rotate };
 }

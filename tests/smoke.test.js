@@ -465,10 +465,11 @@ async function main() {
 
   console.log('\n[14] Статистика в параметрах: computeStats + кэш в background (v0.2.2)');
 
-  // chrome-стаб для импорта service-worker.js (роутер ловим через addListener)
+  // chrome-стаб для импорта service-worker.js (роутер ловим через addListener);
+  // в [17] поднимем его снова — хендлеру ротации нужен chrome.storage
   let swListener = null;
   const swStore = {};
-  globalThis.chrome = {
+  const swChromeStub = {
     runtime: {
       onMessage: { addListener: (fn) => { swListener = fn; } },
       onInstalled: { addListener: () => {} },
@@ -492,6 +493,7 @@ async function main() {
       }
     }
   };
+  globalThis.chrome = swChromeStub;
   const sw = await import(pathToFileURL(path.join(EXT, 'background', 'service-worker.js')).href);
   assert(typeof swListener === 'function' && typeof sw.computeStats === 'function', 'роутер сообщений и computeStats доступны');
 
@@ -702,6 +704,150 @@ async function main() {
   }
   await sleep(50);
   assert(dom18.window.document.querySelectorAll('[data-atr-toggle]').length === 0, 'на странице книги тумблера нет (нет view-контролов)');
+
+  console.log('\n[17] Ротация кодовой фразы (v0.2.6): перешифровка, переезд, порядок записи');
+
+  // chrome-стаб из [14] снова нужен: хендлер ротации работает с chrome.storage
+  globalThis.chrome = swChromeStub;
+  // Конфиг: config.json в тесте не читается — подменяем кэш loadConfig напрямую
+  fb.__setConfigForTest({ databaseURL: 'https://fake-rtdb.example.test' });
+
+  const rotOld = 'старая очень секретная фраза для ротации из пятнадцати слов лежит тут давно';
+  const rotNew = 'совсем новая незнакомая фраза для ротации из пятнадцати слов здесь и сейчас';
+  const rotThird = 'третья уже ненужная фраза для полной замены из пятнадцати слов ещё тут лежит';
+  assert(
+    !phrase.validatePhrase(rotOld) && !phrase.validatePhrase(rotNew) && !phrase.validatePhrase(rotThird),
+    '17: тестовые фразы валидны (12 слов)'
+  );
+  const rotOldUid = await phrase.deriveUserId(rotOld);
+  const rotNewUid = await phrase.deriveUserId(rotNew);
+  const rotThirdUid = await phrase.deriveUserId(rotThird);
+  const rotOldKey = await phrase.deriveKey(rotOld);
+  const rotNewKey = await phrase.deriveKey(rotNew);
+  const rotThirdKey = await phrase.deriveKey(rotThird);
+  const encFor = async (key, mark, t) => ({ updatedAt: t, ...(await phrase.encryptMark(key, mark)) });
+
+  // Фейковая RTDB: маршрутизация по /users/{uid}/marks.json + журнал запросов
+  const rotCloud = { users: {} };
+  const rotLog = []; // {method, uid, body}
+  let rotFailPatch = false; // сбой PATCH → ротация обязана откатиться
+  let rotSlowMs = 0; // искусственно медленные запросы (тест drain)
+  rotCloud.users[rotOldUid] = {
+    '1': await encFor(rotOldKey, 'read', 1000),
+    '2': await encFor(rotOldKey, 'skip', 2000),
+    '3': await encFor(rotOldKey, 'read', 500), // старее снапшота — проиграет (LWW)
+    '4': await encFor(rotThirdKey, 'read', 3000) // чужой ключ — не расшифровать (skipped)
+  };
+  rotCloud.users[rotNewUid] = {
+    '1': await encFor(rotNewKey, 'skip', 999), // LWW: проигрывает записи старого пути (t=1000)
+    '6': await encFor(rotNewKey, 'read', 100) // есть только на новом пути — переживает ротацию
+  };
+
+  globalThis.fetch = async (url, opts = {}) => {
+    const method = opts.method || 'GET';
+    const matched = /\/users\/([^/]+)\/marks\.json$/.exec(String(url));
+    if (!matched) throw new Error('неожиданный URL ротации: ' + url);
+    const uid = matched[1];
+    const body = opts.body ? JSON.parse(opts.body) : null;
+    if (rotSlowMs) await sleep(rotSlowMs);
+    rotLog.push({ method, uid, body });
+    if (method === 'GET') return { ok: true, json: async () => rotCloud.users[uid] || null };
+    if (method === 'PATCH') {
+      if (rotFailPatch) return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
+      const target = (rotCloud.users[uid] = rotCloud.users[uid] || {});
+      for (const [k, v] of Object.entries(body)) {
+        if (v === null) delete target[k];
+        else target[k] = v;
+      }
+      return { ok: true, json: async () => null };
+    }
+    if (method === 'DELETE') {
+      delete rotCloud.users[uid];
+      return { ok: true, json: async () => null };
+    }
+    throw new Error('неподдерживаемый метод: ' + method);
+  };
+
+  // --- 17а: отказы ДО сети — хранилище и облако не тронуты ---
+  swStore['atr.sync.phrase'] = rotOld;
+  swStore['atr.sync.userId'] = rotOldUid;
+
+  fb.__setConfigForTest({});
+  let rotR = await callSw({ type: 'atr:phrase:rotate', phrase: rotNew }, {});
+  assert(rotR.ok === false && /нет конфига/.test(rotR.error), '17а: без конфига ротация отклонена');
+  fb.__setConfigForTest({ databaseURL: 'https://fake-rtdb.example.test' });
+
+  delete swStore['atr.sync.phrase'];
+  rotR = await callSw({ type: 'atr:phrase:rotate', phrase: rotNew }, {});
+  assert(rotR.ok === false && /нет текущей фразы/.test(rotR.error), '17а: без текущей фразы — отказ');
+  swStore['atr.sync.phrase'] = rotOld;
+
+  rotR = await callSw({ type: 'atr:phrase:rotate', phrase: 'one two three' }, {});
+  assert(rotR.ok === false && /Слишком короткая/.test(rotR.error), '17а: короткая новая фраза отклонена');
+
+  rotR = await callSw({ type: 'atr:phrase:rotate', phrase: rotOld }, {});
+  assert(rotR.ok === false && /совпадает/.test(rotR.error), '17а: совпадение с текущей фразой — отказ');
+  assert(rotLog.length === 0, '17а: отказы не породили ни одного сетевого запроса');
+  assert(swStore['atr.sync.phrase'] === rotOld, '17а: фраза в хранилище не изменилась');
+
+  // --- 17б: drain (sync уже в полёте) + guard (sync во время ротации) + миграция ---
+  // Снапшот для LWW намеренно пишет сам sync (saveStatsFrom): {'5' чит, '3' томбстоун}
+  rotSlowMs = 120;
+  const rotSyncP = callSw(
+    { type: 'atr:sync:sync', entries: { '5': { m: 'read', t: 700 }, '3': { m: null, t: 900 } } },
+    { tab: { id: 3 } }
+  );
+  const rotPromise = callSw({ type: 'atr:phrase:rotate', phrase: rotNew }, {});
+  const rotGuard = await callSw({ type: 'atr:sync:sync', entries: {} }, {});
+  assert(rotGuard.ok === false && /смена кодовой фразы/.test(rotGuard.error), '17б: sync во время ротации отклонён (guard)');
+  const [rotSyncRes, rotRes] = await Promise.all([rotSyncP, rotPromise]);
+  rotSlowMs = 0;
+  assert(rotSyncRes.ok === true, '17б: sync, начавшийся до ротации, дождался drain и завершился');
+  assert(
+    rotRes.ok && rotRes.migrated === 5 && rotRes.skipped === 1,
+    `17б: миграция ok, переехало ${rotRes.migrated}, пропущено ${rotRes.skipped} (ожидалось 5 и 1)`
+  );
+  assert(swStore['atr.sync.phrase'] === rotNew && swStore['atr.sync.userId'] === rotNewUid, '17б: новая фраза и userId сохранены');
+  assert(rotCloud.users[rotOldUid] === undefined, '17б: старый путь в БД удалён');
+  assert(rotCloud.users[rotNewUid] && Object.keys(rotCloud.users[rotNewUid]).length === 5, '17б: на новом пути ровно 5 записей');
+
+  const rotMigrated = {};
+  for (const [wid, doc] of Object.entries(rotCloud.users[rotNewUid] || {})) {
+    rotMigrated[wid] = { m: await phrase.decryptMark(rotNewKey, doc), t: doc.updatedAt };
+  }
+  assert(rotMigrated['1'] && rotMigrated['1'].m === 'read' && rotMigrated['1'].t === 1000, '17б: перешифровано новым ключом, LWW: 1000 > 999');
+  assert(rotMigrated['2'] && rotMigrated['2'].m === 'skip' && rotMigrated['2'].t === 2000, '17б: skip-отметка переехала');
+  assert(rotMigrated['3'] && rotMigrated['3'].m === null && rotMigrated['3'].t === 900, '17б: томбстоун из снапшота победил (LWW 900 > 500)');
+  assert(rotMigrated['5'] && rotMigrated['5'].m === 'read' && rotMigrated['5'].t === 700, '17б: запись из снапшота переехала');
+  assert(rotMigrated['6'] && rotMigrated['6'].m === 'read' && rotMigrated['6'].t === 100, '17б: запись нового пути (повтор запуска) сохранена');
+  assert(!('4' in rotMigrated), '17б: запись с чужим ключом не переехала (skipped)');
+
+  const rotDelIdx = rotLog.findIndex((e) => e.method === 'DELETE' && e.uid === rotOldUid);
+  const rotPatchNewIdx = rotLog.reduce((acc, e, i) => (e.method === 'PATCH' && e.uid === rotNewUid ? i : acc), -1);
+  assert(rotPatchNewIdx > -1 && rotDelIdx > rotPatchNewIdx, '17б: PATCH нового пути строго ДО DELETE старого');
+  assert(rotLog.filter((e) => e.method === 'DELETE' && e.uid === rotOldUid).length === 1, '17б: старый путь удалён ровно один раз');
+  assert(rotLog.every((e, i) => e.uid !== rotOldUid || i <= rotDelIdx), '17б: после DELETE к старому пути обращений нет');
+
+  // --- 17в: сбой PATCH → ничего не сохранено → повтор успешен (NEW → THIRD) ---
+  rotFailPatch = true;
+  rotR = await callSw({ type: 'atr:phrase:rotate', phrase: rotThird }, {});
+  assert(rotR.ok === false && /rotate-push/.test(rotR.error), '17в: сбой PATCH возвращает ошибку rotate-push');
+  assert(swStore['atr.sync.phrase'] === rotNew && swStore['atr.sync.userId'] === rotNewUid, '17в: хранилище не изменилось (фраза/userId прежние)');
+  assert(rotCloud.users[rotThirdUid] === undefined, '17в: путь новой фразы не создан');
+  assert(rotCloud.users[rotNewUid] && Object.keys(rotCloud.users[rotNewUid]).length === 5, '17в: старый путь не удалён, записи целы');
+  assert(/rotate-push/.test(swStore['atr.sync.lastError'] || ''), '17в: ошибка сохранена в lastError');
+  assert(rotLog.filter((e) => e.method === 'DELETE' && e.uid === rotNewUid).length === 0, '17в: DELETE старого пути не выполнялся');
+
+  rotFailPatch = false;
+  rotR = await callSw({ type: 'atr:phrase:rotate', phrase: rotThird }, {});
+  assert(rotR.ok && rotR.migrated === 5, '17в: повтор после сбоя прошёл успешно (5 записей)');
+  assert(swStore['atr.sync.phrase'] === rotThird && swStore['atr.sync.userId'] === rotThirdUid, '17в: новая фраза сохранена после успеха');
+  assert(swStore['atr.sync.lastError'] === null, '17в: lastError очищен');
+  assert(rotCloud.users[rotNewUid] === undefined && !!rotCloud.users[rotThirdUid], '17в: переезд завершён, старый путь удалён');
+  const rotFinal1 = await phrase.decryptMark(rotThirdKey, rotCloud.users[rotThirdUid]['1']);
+  assert(rotFinal1 === 'read', '17в: запись расшифровывается уже третьим ключом');
+
+  globalThis.fetch = realFetch;
 
   console.log(failures === 0 ? '\nВСЕ ТЕСТЫ ПРОЙДЕНЫ' : `\nПРОВАЛОВ: ${failures}`);
   process.exit(failures === 0 ? 0 : 1);
