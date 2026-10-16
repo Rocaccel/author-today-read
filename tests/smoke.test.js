@@ -847,6 +847,64 @@ async function main() {
   const rotFinal1 = await phrase.decryptMark(rotThirdKey, rotCloud.users[rotThirdUid]['1']);
   assert(rotFinal1 === 'read', '17в: запись расшифровывается уже третьим ключом');
 
+  // --- 17г: сохранение/смена фразы → открытая вкладка сразу синхронизируется ---
+  // content слушает chrome.storage.onChanged: ветка ключа atr.sync.phrase
+  // (пишут atr:phrase:set и atr:phrase:rotate) → немедленный syncNow().
+  const dom17g = new JSDOM(HTML, { url: 'https://author.today/work/genre/fantasy', runScripts: 'outside-only', pretendToBeVisual: true });
+  const sent17 = [];
+  let changeListener17 = null;
+  let raceNextSync17 = false; // имитация гонки: SW отклонил sync guard'ом ротации
+  dom17g.window.chrome = {
+    runtime: {
+      sendMessage: async (msg) => {
+        sent17.push(msg);
+        if (msg.type === 'atr:sync:sync') {
+          if (raceNextSync17) {
+            raceNextSync17 = false;
+            return { ok: false, error: 'идёт смена кодовой фразы' };
+          }
+          return { ok: true, pull: {}, pushed: 0 };
+        }
+        return { ok: true };
+      }
+    },
+    storage: {
+      onChanged: { addListener: (fn) => { changeListener17 = fn; } },
+      local: { get: async () => ({}) }
+    }
+  };
+  dom17g.window.eval(read('content/storage.js'));
+  dom17g.window.eval(read('content/sync.js'));
+  dom17g.window.ATR.sync.init();
+  assert(await waitFor(() => sent17.some((m) => m.type === 'atr:sync:sync')), '17г: init при загрузке страницы шлёт sync');
+  sent17.length = 0;
+  assert(typeof changeListener17 === 'function', '17г: слушатель chrome.storage.onChanged установлен');
+
+  // вход (atr:phrase:set) или ротация (atr:phrase:rotate) изменили ключ фразы
+  changeListener17({ 'atr.sync.phrase': { newValue: 'новая сохранённая фраза для теста' } }, 'local');
+  assert(await waitFor(() => sent17.some((m) => m.type === 'atr:sync:sync')), '17г: смена фразы → вкладка сразу шлёт sync');
+  sent17.length = 0;
+
+  // «Выйти» (newValue: undefined) — лишний sync не порождаем
+  changeListener17({ 'atr.sync.phrase': { oldValue: 'фраза', newValue: undefined } }, 'local');
+  await sleep(30);
+  assert(!sent17.some((m) => m.type === 'atr:sync:sync'), '17г: удаление фразы (выход) sync не порождает');
+
+  // чужая область storage — игнорируется
+  changeListener17({ 'atr.sync.phrase': { newValue: 'x' } }, 'sync');
+  await sleep(30);
+  assert(!sent17.some((m) => m.type === 'atr:sync:sync'), '17г: событие вне storage.local игнорируется');
+
+  // гонка: ответ SW «идёт смена кодовой фразы» → короткий повтор (schedulePush
+  // ~1.5 с), а НЕ backoff (с backoff-задержкой 60 с повтор не успел бы за 3 с)
+  dom17g.window.ATR.sync.__setRetryDelays([60000]);
+  raceNextSync17 = true;
+  dom17g.window.ATR.sync.syncNow();
+  assert(
+    await waitFor(() => sent17.filter((m) => m.type === 'atr:sync:sync').length >= 2, 3000),
+    '17г: guard-отказ ротации повторён коротким таймером, а не backoff'
+  );
+
   globalThis.fetch = realFetch;
 
   console.log(failures === 0 ? '\nВСЕ ТЕСТЫ ПРОЙДЕНЫ' : `\nПРОВАЛОВ: ${failures}`);

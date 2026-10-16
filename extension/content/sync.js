@@ -30,6 +30,12 @@
   const PENDING_IMPORT_KEY = 'atr.sync.pendingImport';
   let importInFlight = false;
 
+  // Ключ кодовой фразы в chrome.storage (K_PHRASE в service-worker): вход
+  // (atr:phrase:set) и ротация (atr:phrase:rotate, v0.2.6) пишут его —
+  // открытые вкладки подхватывают смену через chrome.storage.onChanged
+  // и сразу синхронизируются, не дожидаясь фокуса/перезагрузки страницы.
+  const PHRASE_KEY = 'atr.sync.phrase';
+
   // Backoff для ретраев при ошибке сети/правил (v0.2.1):
   // 5 с → 15 с → 1 мин → 5 мин → 15 мин (потолок, дальше каждые 15 мин).
   // Цепочка живёт, пока открыта вкладка; данные всегда лежат в localStorage,
@@ -56,7 +62,11 @@
    * Исходы (v0.2.1, ретраи):
    *   ok   — успех → сброс backoff;
    *   skip — нет конфига/фразы → это не сбой, НЕ ретраим (ждём настройки);
-   *   fail — сеть/правила/SW уснул → повтор с backoff (scheduleRetry).
+   *   fail — сеть/правила/SW уснул → повтор с backoff (scheduleRetry);
+   *   retry-soon — SW отклонил sync guard'ом ротации («идёт смена кодовой
+   *     фразы», v0.2.6: событие смены фразы пришло раньше, чем ротация
+   *     успела снять свой флаг) → это не сбой сети, повтор скоро
+   *     (schedulePush ~1.5 с), НЕ backoff.
    */
   async function syncNow() {
     if (!isSupported()) return;
@@ -86,6 +96,10 @@
         }
       } else if (res && res.ok === false && res.skip) {
         outcome = 'skip'; // нет конфига/фразы — ретрай бессмыслен
+      } else if (res && res.ok === false && res.error === 'идёт смена кодовой фразы') {
+        // Гонка (v0.2.6): storage-событие смены фразы обогнало завершение
+        // ротации — guard отклонил sync. Не сетевой сбой: скоро повторим.
+        outcome = 'retry-soon';
       } else {
         outcome = 'fail'; // ok:false c error — ошибка сети/правил
       }
@@ -97,6 +111,7 @@
       inFlight = false;
       if (outcome === 'ok') resetRetry();
       else if (outcome === 'fail') scheduleRetry();
+      else if (outcome === 'retry-soon') schedulePush(); // гонка с ротацией — быстрый повтор
       if (pendingAfterFlight) {
         pendingAfterFlight = false;
         schedulePush();
@@ -191,7 +206,10 @@
    *  3) периодическая сверка при возврате фокуса на вкладку;
    *  4) немедленный повтор после восстановления сети (v0.2.1, событие online);
    *  5) отложенный импорт из Параметров (v0.2.4): проверка при загрузке +
-   *     слушатель chrome.storage.onChanged для уже открытых вкладок.
+   *     слушатель chrome.storage.onChanged для уже открытых вкладок;
+   *  6) сохранение/смена фразы в Параметрах (v0.2.6): ветка того же
+   *     слушателя по ключу atr.sync.phrase → немедленный syncNow()
+   *     (вкладка подтягивает отметки сразу после входа и после ротации).
    */
   function init() {
     if (!isSupported()) return;
@@ -205,6 +223,11 @@
         if (area !== 'local') return;
         const c = changes[PENDING_IMPORT_KEY];
         if (c && c.newValue) applyPendingImport();
+        // Фраза сохранена/сменена (вход либо ротация, v0.2.6) — сразу
+        // подтягиваем отметки из базы; newValue: undefined = «Выйти» —
+        // sync всё равно skip'нулся бы, не порождаем лишний запрос.
+        const p = changes[PHRASE_KEY];
+        if (p && p.newValue) syncNow();
       });
     }
 
