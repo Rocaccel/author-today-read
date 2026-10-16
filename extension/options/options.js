@@ -42,6 +42,21 @@ function formatTime(iso) {
   }
 }
 
+/**
+ * Свежесть статистики (v0.2.6): сегодня — «HH:MM», иной день — «ДД.ММ HH:MM»
+ * (вчерашнее «14:30» не должно выглядеть свежим).
+ */
+function formatStatTime(iso) {
+  try {
+    const d = new Date(iso);
+    const hm = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    if (d.toDateString() === new Date().toDateString()) return hm;
+    return d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' }) + ' ' + hm;
+  } catch (_) {
+    return iso;
+  }
+}
+
 /** Отрисовка блока показа фразы: маска или текст + состояние кнопок. */
 function renderPhrase() {
   const box = $('phrase-text');
@@ -92,6 +107,15 @@ function renderStats(stats) {
   $('stat-read').textContent = String(Number(s.read) || 0);
   $('stat-skip').textContent = String(Number(s.skip) || 0);
   $('stat-total').textContent = String(Number(s.total) || 0);
+  // Свежесть (v0.2.6): строка из stats.at — когда content в последний раз
+  // присылал срез; без единого визита на author.today — скрыта.
+  const atEl = $('stat-at');
+  if (s.at) {
+    atEl.textContent = 'Данные на ' + formatStatTime(s.at);
+    show(atEl, true);
+  } else {
+    show(atEl, false);
+  }
 }
 
 /** Статус блока «Бэкап»: сколько отметок готово к экспорту и на когда. */
