@@ -14,10 +14,13 @@
  *     v, iv, ct: str    — AES-GCM шифротекст отметки (см. shared/phrase.js).
  *   }
  *   users/{userId}/devices/{deviceId} = {           // v0.2.6, §8.9
- *     name, platform: str — имя и «браузер · ОС» (открыто, не шифруется),
- *     createdAt, lastSeen: int — epoch_ms,
+ *     np: {v, iv, ct} — AES-GCM шифротекст JSON {name, platform}
+ *                      (ИМЕНА И ПЛАТФОРМА НЕ ВИДНЫ в консоли — как отметки;
+ *                      расшифровываются ключом от кодовой фразы);
+ *     createdAt, lastSeen: int — epoch_ms (открыто: сортировка/throttle);
  *     deleted: 1 — пометка «удалено» (увидев её своё устройство, сбрасывает
- *                  локальные данные — тихий сброс §8.9).
+ *                  локальные данные — тихий сброс §8.9; открыто — флаг
+ *                  должен читаться до расшифровки).
  *   }
  * Правила БД открытые — контент зашифрован ключом от кодовой фразы
  * (для devices правила должны включать одноранговый узел — §8.2).
@@ -30,7 +33,7 @@
  * Ключ API для RTDB REST не нужен — доступ определяют только правила БД.
  */
 
-import { deriveKey, encryptMark, decryptMark } from '../shared/phrase.js';
+import { deriveKey, encryptMark, decryptMark, encryptJson, decryptJson } from '../shared/phrase.js';
 
 /** Срок жизни томбстоунов (v0.2.1): после — удаляются локально и в БД. */
 export const GC_TOMBSTONE_MS = 90 * 24 * 60 * 60 * 1000;
@@ -38,7 +41,11 @@ export const GC_TOMBSTONE_MS = 90 * 24 * 60 * 60 * 1000;
 /** Кэш ключа: PBKDF2 (100k) дорогой — не выводим на каждый sync. */
 let keyCache = { phrase: null, key: null };
 
-async function getKeyForPhrase(phrase) {
+/**
+ * Вывод AES-ключа из фразы с кэшем (экспорт v0.2.6): SW использует его для
+ * шифрования/расшифровки name+platform устройств (§8.9), не повторяя PBKDF2.
+ */
+export async function getKeyForPhrase(phrase) {
   if (keyCache.phrase === phrase && keyCache.key) return keyCache.key;
   const key = await deriveKey(phrase);
   keyCache = { phrase, key };
@@ -77,10 +84,13 @@ export function initFirebase(config = {}) {
   const deviceUrl = (userId, deviceId) => `${root}/users/${userId}/devices/${deviceId}.json`;
 
   /**
-   * Список устройств (v0.2.6, §8.9): {deviceId: {name, platform, createdAt,
-   * lastSeen, deleted?}}. Пустой узел → {}. Бросает httpError('devices-get')
-   * при сбое (старые правила БД без узла devices → 403) — в sync такой сбой
-   * гасится, чтобы синхронизация отметок продолжала работать как раньше.
+   * Список устройств (v0.2.6, §8.9): {deviceId: {np:{v,iv,ct}, createdAt,
+   * lastSeen, deleted?}} — как в БД, БЕЗ расшифровки (расшифровка name/
+   * platform — на стороне SW, см. service-worker.js; legacy-узлы со старым
+   * открытым `name` приходят как есть). Пустой узел → {}. Бросает
+   * httpError('devices-get') при сбое (старые правила БД без узла devices
+   * → 403) — в sync такой сбой гасится, чтобы синхронизация отметок
+   * продолжала работать как раньше.
    */
   async function getDevices(userId) {
     const res = await fetch(devicesUrl(userId), { method: 'GET' });
@@ -96,8 +106,10 @@ export function initFirebase(config = {}) {
 
   /**
    * Запись одного устройства: PATCH ПО ПУТИ узла — RTDB мержит переданные
-   * поля в существующий узел (platform/createdAt/`deleted` не затираются
-   * частичным {name} или {lastSeen}). Несуществующее устройство создаётся.
+   * поля в существующий узел (createdAt/`deleted` не затираются частичным
+   * `{np}` или `{lastSeen}`; `name: null`/`platform: null` — удаление
+   * legacy-полей открытого формата). Несуществующее устройство создаётся.
+   * Тело с `np` вызывающий формирует сам (encryptJson в service-worker.js).
    */
   async function putDevice(userId, deviceId, data) {
     const res = await fetch(deviceUrl(userId, deviceId), {
@@ -402,13 +414,38 @@ export function initFirebase(config = {}) {
       // данные: сбой НЕ проваливает ротацию (устройства дозапишут себя сами
       // при следующем sync — регистрация видит отсутствие записи). Старые
       // правила БД (без devices) → 403 → просто пропускаем.
+      // name+platform перешифровываются: payload старого пути расшифровывается
+      // СТАРЫМ ключом (legacy-узел с открытым `name` — как есть) и зашифровывается
+      // НОВЫМ — иначе после смены фразы имена не читались бы новым ключом.
+      // Битый payload → узел переносится без np (имя станет фолбэком).
       try {
         const oldDevices = await getDevices(oldUserId);
-        if (Object.keys(oldDevices).length) {
+        const migrated = {};
+        for (const [id, node] of Object.entries(oldDevices)) {
+          const copy = { ...node };
+          delete copy.name; // legacy-поля открытого формата в новый путь не едут
+          delete copy.platform;
+          if (node.np) {
+            try {
+              const fields = await decryptJson(oldKey, node.np);
+              copy.np = await encryptJson(newKey, fields);
+            } catch (err) {
+              delete copy.np;
+              console.warn('[ATR] ротация: устройство перенесено без имени (не расшифровалось):', id);
+            }
+          } else if (typeof node.name === 'string' || typeof node.platform === 'string') {
+            copy.np = await encryptJson(newKey, {
+              name: String(node.name || ''),
+              platform: String(node.platform || '')
+            });
+          }
+          migrated[id] = copy;
+        }
+        if (Object.keys(migrated).length) {
           const r2 = await fetch(devicesUrl(newUserId), {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(oldDevices)
+            body: JSON.stringify(migrated)
           });
           if (!r2.ok) throw httpError('rotate-devices', r2);
           const r3 = await fetch(devicesUrl(oldUserId), { method: 'DELETE' });

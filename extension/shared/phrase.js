@@ -139,3 +139,25 @@ export async function decryptMark(key, payload) {
   const parsed = JSON.parse(new TextDecoder().decode(ct));
   return parsed && typeof parsed.m === 'object' ? null : parsed.m;
 }
+
+/**
+ * Шифрование произвольного JSON-объекта (v0.2.6) — тот же конверт {v, iv, ct}
+ * и та же AES-GCM-сессия, что у отметок. Используется для name/platform
+ * устройств (§8.9): в консоли Firebase читается только шифротекст.
+ */
+export async function encryptJson(key, value) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = enc.encode(JSON.stringify(value));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext);
+  return { v: '1', iv: toBase64(iv), ct: toBase64(new Uint8Array(ct)) };
+}
+
+/** Дешифрование { v, iv, ct } → объект. Неверный ключ/битые данные — исключение. */
+export async function decryptJson(key, payload) {
+  const ct = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: fromBase64(payload.iv) },
+    key,
+    fromBase64(payload.ct)
+  );
+  return JSON.parse(new TextDecoder().decode(ct));
+}

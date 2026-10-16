@@ -15,8 +15,10 @@
  *                     возврат pull
  *   atr:data:wipe     → полное удаление данных (v0.2.6, §8.8)
  *   atr:devices:list  → список устройств текущей фразы (v0.2.6, §8.9);
+ *                       name+platform расшифровываются здесь (np в БД, §8.2),
  *                       увидев deleted:1 у СЕБЯ — тихий сброс + {reset:true}
  *   atr:devices:rename {deviceId, name} → переименование устройства
+ *                       (имя пишется снова шифром — np)
  *   atr:devices:remove {deviceId} → пометить чужое устройство удалённым
  *                       (своё — отказ: удалить можно только другое)
  *
@@ -24,8 +26,8 @@
  * страница author.today её не видит). В page localStorage не попадает.
  */
 
-import { initFirebase, loadConfig } from './firebase.js';
-import { validatePhrase, normalizePhrase, deriveUserId } from '../shared/phrase.js';
+import { initFirebase, loadConfig, getKeyForPhrase } from './firebase.js';
+import { validatePhrase, normalizePhrase, deriveUserId, encryptJson, decryptJson } from '../shared/phrase.js';
 
 // Ключи chrome.storage.local (префикс atr.* — не пересекаемся ни с чем)
 const K_PHRASE = 'atr.sync.phrase';
@@ -362,28 +364,72 @@ async function performRemoteReset(client, userId, deviceId, floor = 0) {
 const DEVICE_SEEN_THROTTLE_MS = 30 * 60 * 1000;
 
 /**
+ * Шифрованный payload `{name, platform}` для узла устройства (v0.2.6, §8.9):
+ * в БД лежит `np: {v, iv, ct}` — имена не читаются в консоли Firebase
+ * (та же фраза и AES-GCM, что у отметок; ключ — с кэшем PBKDF2 в firebase.js).
+ */
+async function encryptDeviceFields(phrase, name, platform) {
+  const key = await getKeyForPhrase(phrase);
+  return encryptJson(key, { name, platform });
+}
+
+/**
+ * Расшифровка полей устройства → `{name, platform}`:
+ *  - `np` → decryptJson; битый payload/чужой ключ → пустые строки
+ *    (в списке покажется фолбэк-имя, строка не пропадает);
+ *  - legacy-узел открытого формата (записан до шифрования) → поля как есть:
+ *    регистрация перезапишет его шифром при первом же sync (авто-лечение).
+ */
+async function decryptDeviceFields(phrase, node) {
+  if (node.np) {
+    try {
+      const key = await getKeyForPhrase(phrase);
+      const fields = await decryptJson(key, node.np);
+      return {
+        name: String((fields && fields.name) || ''),
+        platform: String((fields && fields.platform) || '')
+      };
+    } catch (err) {
+      return { name: '', platform: '' };
+    }
+  }
+  return { name: String(node.name || ''), platform: String(node.platform || '') };
+}
+
+/**
  * Регистрация устройства и heartbeat (v0.2.6, §8.9), после успешного sync:
- *  - записи нет (новое устройство / ротация не перенесла список) → создаём
- *    с дефолтным именем из UA (переименовать можно в Параметрах, §8.5);
- *  - есть → `lastSeen` не чаще одного раза в 30 минут (лимит записи).
+ *  - записи нет, узел открытого формата (нет `np`/есть открытые `name`) →
+ *    (пере)записываем ШИФРОВАННЫМ payload + `name:null, platform:null`
+ *    вычищает legacy-поля — авто-лечение старых узлов из консоли;
+ *  - иначе `lastSeen` не чаще одного раза в 30 минут (лимит записи).
  * Сбои гасим: устройства — вторичные данные, сам sync уже успешен
  * (старые правила БД без `devices` → список `null` → просто молчим).
  */
-async function syncDeviceActivity(client, userId, deviceId, devices) {
+async function syncDeviceActivity(client, userId, deviceId, devices, phrase) {
   if (!devices) return;
   try {
     const entry = devices[deviceId];
-    if (!entry) {
-      const name = deviceNameFromUA();
+    const hasLegacy = entry && (entry.name !== undefined || entry.platform !== undefined);
+    if (!entry || !entry.np || hasLegacy) {
+      // При лечении legacy-узла прежнее открытое имя/платформа СОХРАНЯЮТСЯ
+      // (шифруются как есть); новое устройство получает дефолт из UA.
+      const legacyName = entry ? String(entry.name || '') : '';
+      const name = legacyName || deviceNameFromUA();
+      const platform = (entry && String(entry.platform || '')) || legacyName || name;
       await client.putDevice(userId, deviceId, {
-        name,
-        platform: name,
-        createdAt: Date.now(),
+        np: await encryptDeviceFields(phrase, name, platform),
+        name: null, // null в PATCH = удаление legacy-поля открытого формата
+        platform: null,
+        createdAt: (entry && Number(entry.createdAt)) || Date.now(),
         lastSeen: Date.now()
       });
       console.info('[ATR] устройство добавлено в список:', name);
     } else if (Date.now() - (Number(entry.lastSeen) || 0) > DEVICE_SEEN_THROTTLE_MS) {
-      await client.putDevice(userId, deviceId, { lastSeen: Date.now() });
+      await client.putDevice(userId, deviceId, {
+        lastSeen: Date.now(),
+        name: null,
+        platform: null
+      });
     }
   } catch (err) {
     console.warn('[ATR] не удалось обновить устройство в списке:', err && err.message);
@@ -449,17 +495,22 @@ async function handleDevicesList() {
     return { ok: false, reset: true };
   }
 
-  const list = Object.entries(devices || {})
-    .filter(([id, d]) => id && d && d.deleted !== 1)
-    .map(([id, d]) => ({
+  // name+platform расшифровываются здесь (np в БД, §8.9): битый payload →
+  // пустые строки → фолбэк-имя в строке списка, чужой ключ не ломает ответ.
+  const rows = [];
+  for (const [id, d] of Object.entries(devices || {})) {
+    if (!id || !d || d.deleted === 1) continue;
+    const fields = await decryptDeviceFields(ctx.phrase, d);
+    rows.push({
       id,
-      name: String(d.name || 'Устройство без имени'),
-      platform: String(d.platform || ''),
+      name: fields.name || 'Устройство без имени',
+      platform: fields.platform,
       createdAt: Number(d.createdAt) || 0,
       lastSeen: Number(d.lastSeen) || 0
-    }))
-    .sort((a, b) => (b.lastSeen || b.createdAt) - (a.lastSeen || a.createdAt));
-  return { ok: true, devices: list, ownId: deviceId };
+    });
+  }
+  rows.sort((a, b) => (b.lastSeen || b.createdAt) - (a.lastSeen || a.createdAt));
+  return { ok: true, devices: rows, ownId: deviceId };
 }
 
 /**
@@ -467,7 +518,9 @@ async function handleDevicesList() {
  * своё — задать нормальное имя после первого входа). Имя: trim + схлопывание
  * пробелов, 1–40 символов. Сначала GET: цель обязана существовать и быть
  * активной — иначе PATCH создал бы узел из ничего. PATCH по ПУТИ узла:
- * platform/createdAt/lastSeen сохраняются.
+ * платформа расшифровывается из прежнего `np` и зашивается обратно с новым
+ * именем (createdAt/lastSeen/`deleted` сохраняются); `name:null, platform:null`
+ * вычищает legacy-поля открытого формата, если узел ещё старый.
  */
 async function handleDevicesRename(msg) {
   const name = String((msg && msg.name) || '').trim().replace(/\s+/g, ' ');
@@ -484,7 +537,12 @@ async function handleDevicesRename(msg) {
     const target = devices[deviceId];
     if (!target) return { ok: false, error: 'устройство не найдено (возможно, уже удалено)' };
     if (target.deleted === 1) return { ok: false, error: 'устройство удалено' };
-    await client.putDevice(ctx.userId, deviceId, { name });
+    const prev = await decryptDeviceFields(ctx.phrase, target);
+    await client.putDevice(ctx.userId, deviceId, {
+      np: await encryptDeviceFields(ctx.phrase, name, prev.platform),
+      name: null,
+      platform: null
+    });
     return { ok: true };
   } catch (err) {
     return { ok: false, error: withRulesHint(err) };
@@ -569,7 +627,7 @@ async function handleSync(msg, sender) {
       await setLastError(null);
 
       // Регистрация/heartbeat устройства (best-effort, §8.9).
-      await syncDeviceActivity(client, userId, deviceId, result.devices);
+      await syncDeviceActivity(client, userId, deviceId, result.devices, phrase);
 
       // gc (v0.2.1) — workId протухших томбстоунов: content жёстко удалит их
       // локально через storage.applyGc (узлы в БД уже удалены в firebase.js).

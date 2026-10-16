@@ -1090,9 +1090,23 @@ async function main() {
       const id = mD[2];
       if (method === 'GET') return { ok: true, json: async () => (id ? t.devices[id] || null : t.devices) };
       if (method === 'PATCH') {
-        // RTDB PATCH мержит тело в существующий узел — как в проде
-        if (id) t.devices[id] = { ...(t.devices[id] || {}), ...body };
-        else Object.assign(t.devices, body); // мерж списка целиком (ротация)
+        // RTDB PATCH мержит тело в существующий узел; null удаляет поле — как в проде
+        const applyPatch = (node, patch) => {
+          const out = node || {};
+          for (const [k, v] of Object.entries(patch)) {
+            if (v === null) delete out[k];
+            else out[k] = v;
+          }
+          return out;
+        };
+        if (id) t.devices[id] = applyPatch(t.devices[id], body);
+        else {
+          // мерж списка целиком (ротация): ключи — deviceId, значения — узлы
+          for (const [k, v] of Object.entries(body)) {
+            if (v === null) delete t.devices[k];
+            else t.devices[k] = applyPatch(t.devices[k], v);
+          }
+        }
         return { ok: true, json: async () => null };
       }
       if (method === 'DELETE') {
@@ -1106,6 +1120,8 @@ async function main() {
 
   const dPh = 'абсолютно новая системная фраза для списка устройств из множества разных слов тут';
   const dUid = await phrase.deriveUserId(dPh);
+  const dKey19 = await phrase.deriveKey(dPh); // ключ шифрования name+platform (§8.9)
+  const encDev19 = (fields) => phrase.encryptJson(dKey19, fields);
   const dKeys = [
     'atr.sync.phrase', 'atr.sync.userId', 'atr.sync.lastSync', 'atr.sync.lastError',
     'atr.sync.stats', 'atr.sync.snapshot', 'atr.sync.pendingImport', 'atr.sync.deviceId'
@@ -1178,7 +1194,10 @@ async function main() {
   res19 = await callSw({ type: 'atr:sync:sync', entries: {} }, { tab: { id: 7 } });
   const reg19 = devLog.find((c) => c.method === 'PATCH' && c.url.includes('/devices/dev-new.json'));
   assert(res19.ok && reg19, '19г: новое устройство зарегистрировано одним PATCH');
-  assert(reg19.body.name && reg19.body.platform && reg19.body.createdAt > 0 && reg19.body.lastSeen > 0, '19г: запись содержит name/platform/createdAt/lastSeen');
+  assert(reg19.body.np && reg19.body.name === null && reg19.body.platform === null && reg19.body.createdAt > 0 && reg19.body.lastSeen > 0, '19г: PATCH несёт шифрованный np + скраб legacy-полей (name:null)');
+  const regFields19 = await phrase.decryptJson(dKey19, reg19.body.np);
+  assert(typeof regFields19.name === 'string' && regFields19.name.length > 0 && regFields19.platform === regFields19.name, '19г: np расшифровывается — name+platform живут только внутри шифротекста');
+  assert(!JSON.stringify(reg19.body).includes('"name":"'), '19г: открытым именем в теле PATCH нет');
 
   devLog.length = 0;
   await callSw({ type: 'atr:sync:sync', entries: {} }, { tab: { id: 7 } });
@@ -1188,20 +1207,41 @@ async function main() {
   devLog.length = 0;
   await callSw({ type: 'atr:sync:sync', entries: {} }, { tab: { id: 7 } });
   const hb19 = devLog.find((c) => c.method === 'PATCH' && c.url.includes('/devices/dev-new.json'));
-  assert(hb19 && hb19.body.lastSeen > 0 && !('name' in hb19.body), '19г: после 30 минут — heartbeat PATCH только {lastSeen}');
+  assert(hb19 && hb19.body.lastSeen > 0 && hb19.body.name === null && !('np' in hb19.body), '19г: heartbeat — только lastSeen + скраб, np не переотправляется');
 
-  // --- 19д: список: фильтр удалённых, ownId, содержимое строк ---
+  // авто-лечение legacy-узла: открытое имя сохраняется, но уходит под шифр
+  tree(dUid).devices['dev-new'] = { name: 'Старое имя', platform: 'Chrome', createdAt: 5, lastSeen: Date.now() };
+  devLog.length = 0;
+  await callSw({ type: 'atr:sync:sync', entries: {} }, { tab: { id: 7 } });
+  const heal19 = devLog.find((c) => c.method === 'PATCH' && c.url.includes('/devices/dev-new.json'));
+  const healedNode19 = tree(dUid).devices['dev-new'];
+  assert(heal19 && heal19.body.np && heal19.body.name === null, '19г: legacy-узел вылечен немедленно (без ожидания throttle)');
+  assert(!('name' in healedNode19) && !('platform' in healedNode19) && healedNode19.createdAt === 5, '19г: открытым name/platform в узле больше нет, createdAt сохранён');
+  const healed19 = await phrase.decryptJson(dKey19, healedNode19.np);
+  assert(healed19.name === 'Старое имя' && healed19.platform === 'Chrome', '19г: прежнее имя/платформа сохранены, но уже зашифрованы');
+
+  // --- 19д: список: фильтр удалённых, ownId, расшифровка np + legacy-совместимость ---
   seedDStore('dev-own');
   tree(dUid).devices = {
     'dev-own': { name: 'Мой ноутбук', platform: 'Chrome · Windows', createdAt: 1, lastSeen: 2 },
-    'dev-other': { name: 'Телефон', platform: 'Chrome · Android', createdAt: 3, lastSeen: 4 },
+    'dev-other': { np: await encDev19({ name: 'Телефон', platform: 'Chrome · Android' }), createdAt: 3, lastSeen: 4 },
     'dev-gone': { name: 'Бывший', deleted: 1, createdAt: 5, lastSeen: 6 }
   };
   res19 = await callSw({ type: 'atr:devices:list' }, {});
   const listIds19 = (res19.devices || []).map((d) => d.id);
   assert(res19.ok && res19.ownId === 'dev-own', '19д: список ok, ownId — своё устройство');
   assert(listIds19.includes('dev-own') && listIds19.includes('dev-other') && !listIds19.includes('dev-gone'), '19д: удалённые отфильтрованы, активные — в списке');
-  assert(res19.devices.length === 2 && typeof res19.devices[0].name === 'string' && res19.devices[0].platform, '19д: только активные, строки содержат name/platform');
+  assert(res19.devices.length === 2, '19д: только активные в списке');
+  const dOther19 = res19.devices.find((d) => d.id === 'dev-other');
+  const dOwn19 = res19.devices.find((d) => d.id === 'dev-own');
+  assert(dOther19 && dOther19.name === 'Телефон' && dOther19.platform === 'Chrome · Android', '19д: name/platform расшифрованы из np');
+  assert(dOwn19 && dOwn19.name === 'Мой ноутбук' && dOwn19.platform === 'Chrome · Windows', '19д: legacy-узел (без np) показывается как есть');
+
+  tree(dUid).devices['dev-broken'] = { np: { v: '1', iv: 'AAAAAAAAAAAAAAAA', ct: 'AAAAAAAAAAAAAAAA' }, createdAt: 7, lastSeen: 8 };
+  res19 = await callSw({ type: 'atr:devices:list' }, {});
+  const dBroken19 = (res19.devices || []).find((d) => d.id === 'dev-broken');
+  assert(res19.ok && dBroken19 && dBroken19.name === 'Устройство без имени', '19д: битый/чужой np → фолбэк-имя, список не падает');
+  delete tree(dUid).devices['dev-broken'];
 
   // --- 19е: свой deleted:1 через список (без вкладок сайта) → тихий сброс ---
   tree(dUid).devices['dev-own'] = { name: 'Мой ноутбук', deleted: 1, createdAt: 1 };
@@ -1212,11 +1252,11 @@ async function main() {
   assert(!('atr.sync.deviceId' in swStore), '19е: deviceId удалён — следующий вход зарегистрирует новое устройство');
   assert(devLog.filter((c) => c.method === 'DELETE' && c.url.includes('/devices/dev-own.json')).length === 1, '19е: узел самоочищен (best-effort)');
 
-  // --- 19ж: переименование: валидация, существование, trim, PATCH по пути ---
+  // --- 19ж: переименование: валидация, существование, trim, шифрование имени ---
   seedDStore('dev-own');
   tree(dUid).devices = {
     'dev-own': { name: 'Мой', createdAt: 1 },
-    'dev-other': { name: 'Телефон', createdAt: 1 }
+    'dev-other': { np: await encDev19({ name: 'Телефон', platform: 'Chrome · Android' }), createdAt: 1 }
   };
   devLog.length = 0;
   res19 = await callSw({ type: 'atr:devices:rename', deviceId: 'dev-other', name: '   ' }, {});
@@ -1235,8 +1275,18 @@ async function main() {
   devLog.length = 0;
   res19 = await callSw({ type: 'atr:devices:rename', deviceId: 'dev-other', name: '  Мой   телефон  ' }, {});
   const rn19 = devLog.find((c) => c.method === 'PATCH' && c.url.includes('/devices/dev-other.json'));
-  assert(res19.ok && rn19 && rn19.body.name === 'Мой телефон', '19ж: trim + схлопывание пробелов, PATCH {name}');
+  assert(res19.ok && rn19 && rn19.body.np && rn19.body.name === null && rn19.body.platform === null, '19ж: PATCH {np, name:null, platform:null} — имя уходит только шифром');
+  const rnFields19 = await phrase.decryptJson(dKey19, rn19.body.np);
+  assert(rnFields19.name === 'Мой телефон' && rnFields19.platform === 'Chrome · Android', '19ж: trim + схлопывание пробелов, platform расшифрован и сохранён');
+  assert(!('name' in tree(dUid).devices['dev-other']) && !('platform' in tree(dUid).devices['dev-other']), '19ж: открытым name/platform в узле не осталось');
   assert(tree(dUid).devices['dev-other'].createdAt === 1, '19ж: createdAt узла сохранён (PATCH по пути узла)');
+
+  devLog.length = 0;
+  res19 = await callSw({ type: 'atr:devices:rename', deviceId: 'dev-own', name: 'Ноутбук' }, {});
+  const rnOwn19 = devLog.find((c) => c.method === 'PATCH' && c.url.includes('/devices/dev-own.json'));
+  const rnOwnFields19 = await phrase.decryptJson(dKey19, rnOwn19.body.np);
+  assert(res19.ok && rnOwnFields19.name === 'Ноутбук' && rnOwnFields19.platform === '', '19ж: rename legacy-узла — имя шифруется, platform берётся из прежнего открытого поля');
+  assert(!('name' in tree(dUid).devices['dev-own']), '19ж: открытое имя legacy-узла вычищено');
 
   tree(dUid).devices['dev-x'] = { name: 'X', deleted: 1, createdAt: 7 };
   res19 = await callSw({ type: 'atr:devices:rename', deviceId: 'dev-x', name: 'Н' }, {});
@@ -1250,7 +1300,7 @@ async function main() {
 
   res19 = await callSw({ type: 'atr:devices:remove', deviceId: 'dev-other' }, {});
   assert(res19.ok === true && tree(dUid).devices['dev-other'].deleted === 1, '19з: чужое устройство → deleted: 1');
-  assert(tree(dUid).devices['dev-other'].name === 'Мой телефон', '19з: остальные поля узла не затёрты');
+  assert(tree(dUid).devices['dev-other'].np && tree(dUid).devices['dev-other'].createdAt === 1, '19з: остальные поля узла не затёрты (np/createdAt на месте)');
 
   devLog.length = 0;
   res19 = await callSw({ type: 'atr:devices:remove', deviceId: 'dev-other' }, {});
@@ -1283,7 +1333,17 @@ async function main() {
   res19 = await callSw({ type: 'atr:phrase:rotate', phrase: rotNew19 }, {});
   const devPatch19 = devLog.find((c) => c.method === 'PATCH' && c.url.includes(`/users/${rotNewUid19}/devices.json`));
   assert(res19.ok === true && res19.migrated === 1, '19и: ротация прошла, запись снапшота переехала');
-  assert(devPatch19 && devPatch19.body['dev-mig'] && devPatch19.body['dev-mig'].name === 'Ноутбук', '19и: устройства перенесены PATCH на новый userId');
+  assert(devPatch19 && devPatch19.body['dev-mig'] && devPatch19.body['dev-mig'].np && !('name' in devPatch19.body['dev-mig']) && !('platform' in devPatch19.body['dev-mig']), '19и: устройства перенесены PATCH на новый userId — имя уже шифром, открытых полей нет');
+  const migFields19 = await phrase.decryptJson(await phrase.deriveKey(rotNew19), devPatch19.body['dev-mig'].np);
+  assert(migFields19.name === 'Ноутбук' && migFields19.platform === 'Linux', '19и: перенесённый np расшифровывается НОВОЙ фразой');
+  let oldKeyFails19 = false;
+  try {
+    await phrase.decryptJson(await phrase.deriveKey(rotOld19), devPatch19.body['dev-mig'].np);
+  } catch (e) {
+    oldKeyFails19 = true;
+  }
+  assert(oldKeyFails19, '19и: старая фраза новый np не расшифровывает (ключи разные)');
+  assert(!JSON.stringify(devPatch19.body).includes('Ноутбук'), '19и: открытым именем в теле миграции нет');
   assert(tree(rotNewUid19).devices['dev-gone2'] && tree(rotNewUid19).devices['dev-gone2'].deleted === 1, '19и: флаг deleted у перенесённого устройства сохранён');
   assert(devLog.filter((c) => c.method === 'DELETE' && c.url.includes(`/users/${rotOldUid19}/devices.json`)).length === 1, '19и: старый узел devices удалён ровно один раз');
   assert(!tree(rotOldUid19).devices['dev-mig'], '19и: у старого userId устройств больше нет');
